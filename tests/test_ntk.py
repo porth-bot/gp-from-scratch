@@ -65,7 +65,11 @@ def test_empirical_ntk_converges_to_analytic():
     assert rel < 0.05, rel
 
 
-def test_init_covariance_converges_to_nngp():
+def test_init_covariance_matches_nngp():
+    """For one hidden layer the init covariance equals the NNGP exactly at
+    ANY width (mean of i.i.d. per-neuron terms) -- the tolerance below is
+    pure ensemble Monte-Carlo error, not a finite-width effect. What
+    converges with width is Gaussianity (see experiments)."""
     rng = np.random.default_rng(3)
     X = np.array([[-1.5], [0.0], [0.8], [2.2]])
     Xa = _augment(X)
