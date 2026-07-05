@@ -42,23 +42,80 @@ def sqdist(X1, X2):
 
 
 class Kernel:
-    """Base: holds theta (log-params) and param names."""
+    """Base for leaf kernels: log-params ``_theta`` plus an optional ``fixed`` mask.
+
+    Fixed parameters. Some hyperparameters are known from the physics and
+    should not be learned -- the canonical case is the CO2 seasonal period,
+    which is exactly one year. Freezing such a parameter is not just a
+    convenience: leaving it free can wreck the optimization (the periodic
+    log-period gradient is enormous near a phase mismatch, blowing up Adam),
+    so pinning it to the known value both encodes prior knowledge and
+    stabilizes ML-II.
+
+    The mechanism is a boolean mask ``_fixed`` over the log-params. The public
+    interface then reports *free* parameters only:
+
+    - ``theta`` (get/set) exposes just the free entries, so an optimizer never
+      sees or touches a fixed one.
+    - ``grads(X)`` returns one gradient per free entry, in ``theta`` order.
+    - ``n_params`` counts free entries (used by ``Sum``/``Product`` to split a
+      concatenated theta correctly).
+
+    ``__call__`` always uses the full ``_theta``, so a fixed parameter keeps
+    its constructed value in every covariance evaluation. With nothing fixed
+    (the default) the behavior is identical to a plain unconstrained kernel.
+    """
 
     names: tuple = ()
 
+    def _mask(self, fixed):
+        """Build the boolean fixed-mask from ``fixed`` (called by subclasses).
+
+        ``fixed`` may be None (nothing fixed), an iterable of parameter names
+        drawn from ``self.names``, or a boolean mask the length of ``_theta``.
+        """
+        n = len(self._theta)
+        if fixed is None:
+            return np.zeros(n, dtype=bool)
+        fixed = list(fixed)
+        if all(isinstance(f, str) for f in fixed):
+            idx = {name: i for i, name in enumerate(self.names)}
+            mask = np.zeros(n, dtype=bool)
+            for name in fixed:
+                if name not in idx:
+                    raise ValueError(
+                        f"unknown parameter {name!r}; choose from {self.names}"
+                    )
+                mask[idx[name]] = True
+            return mask
+        mask = np.asarray(fixed, dtype=bool)
+        if mask.shape != (n,):
+            raise ValueError(f"fixed mask must have length {n}")
+        return mask
+
+    @property
+    def free(self):
+        """Boolean mask of the trainable (non-fixed) parameters."""
+        return ~self._fixed
+
     @property
     def theta(self):
-        return self._theta.copy()
+        return self._theta[self.free].copy()
 
     @theta.setter
     def theta(self, value):
         value = np.asarray(value, dtype=float)
-        assert value.shape == self._theta.shape
-        self._theta = value.copy()
+        assert value.shape == self._theta[self.free].shape
+        self._theta[self.free] = value
 
     @property
     def n_params(self):
-        return len(self._theta)
+        return int(self.free.sum())
+
+    def grads(self, X):
+        """dK/dtheta_i for the free parameters, in ``theta`` order."""
+        full = self._grads_full(X)
+        return [g for g, fixed in zip(full, self._fixed) if not fixed]
 
     def __add__(self, other):
         return Sum(self, other)
@@ -80,14 +137,15 @@ class RBF(Kernel):
 
     names = ("s2", "l")
 
-    def __init__(self, s2=1.0, l=1.0):
+    def __init__(self, s2=1.0, l=1.0, fixed=None):
         self._theta = np.log([s2, l])
+        self._fixed = self._mask(fixed)
 
     def __call__(self, X1, X2):
         s2, l = np.exp(self._theta)
         return s2 * np.exp(-0.5 * sqdist(X1, X2) / l**2)
 
-    def grads(self, X):
+    def _grads_full(self, X):
         _, l = np.exp(self._theta)
         d2 = sqdist(X, X)
         K = self(X, X)
@@ -111,11 +169,12 @@ class Matern(Kernel):
 
     names = ("s2", "l")
 
-    def __init__(self, nu=1.5, s2=1.0, l=1.0):
+    def __init__(self, nu=1.5, s2=1.0, l=1.0, fixed=None):
         if nu not in (0.5, 1.5, 2.5):
             raise ValueError("closed forms exist for nu in {0.5, 1.5, 2.5}")
         self.nu = nu
         self._theta = np.log([s2, l])
+        self._fixed = self._mask(fixed)
 
     def _a(self, X1, X2):
         _, l = np.exp(self._theta)
@@ -132,7 +191,7 @@ class Matern(Kernel):
             poly = 1.0 + a + a**2 / 3.0
         return s2 * poly * np.exp(-a)
 
-    def grads(self, X):
+    def _grads_full(self, X):
         s2, _ = np.exp(self._theta)
         a = self._a(X, X)
         e = np.exp(-a)
@@ -160,15 +219,16 @@ class Periodic(Kernel):
 
     names = ("s2", "l", "p")
 
-    def __init__(self, s2=1.0, l=1.0, p=1.0):
+    def __init__(self, s2=1.0, l=1.0, p=1.0, fixed=None):
         self._theta = np.log([s2, l, p])
+        self._fixed = self._mask(fixed)
 
     def __call__(self, X1, X2):
         s2, l, p = np.exp(self._theta)
         r = np.sqrt(sqdist(X1, X2))
         return s2 * np.exp(-2.0 * np.sin(np.pi * r / p) ** 2 / l**2)
 
-    def grads(self, X):
+    def _grads_full(self, X):
         _, l, p = np.exp(self._theta)
         r = np.sqrt(sqdist(X, X))
         K = self(X, X)
