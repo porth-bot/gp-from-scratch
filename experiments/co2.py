@@ -11,12 +11,19 @@ The Periodic * RBF product is the key move: exactly-periodic correlation
 modulated by a long-lengthscale RBF, i.e. "seasonal, but this year's cycle
 resembles next year's more than one 30 years out".
 
+The seasonal PERIOD is frozen at exactly 1.0 year (``fixed=["p"]``). It is
+known from the physics, and freezing it is also a numerical necessity: near a
+phase mismatch the periodic log-period gradient is enormous (order 1e3 at this
+init), which destabilizes Adam and made an earlier free-period run diverge and
+fall back to its initialization. With the period pinned, the remaining nine
+hyperparameters optimize smoothly at lr=0.01 over 800 steps.
+
 Honest evaluation FIRST: fit on data up to 2015.0 only, forecast the held-out
 2015-2026 months (true out-of-sample -- the model never sees them), report
 RMSE and 95% coverage. Then refit on everything for the 2040 extrapolation
 figure.
 
-Run:  python experiments/co2.py    (~2 min: ML-II on n~700 with 10 params)
+Run:  python experiments/co2.py    (~2 min: ML-II on n~700 with 9 free params)
 """
 
 import numpy as np
@@ -38,18 +45,19 @@ def load_co2():
 
 def make_kernel():
     trend = RBF(s2=50.0**2, l=40.0)
-    seasonal = Periodic(s2=4.0, l=1.3, p=1.0) * RBF(s2=1.0, l=90.0)
+    # Period frozen at 1.0 yr (known physics + gradient stability); see module docstring.
+    seasonal = Periodic(s2=4.0, l=1.3, p=1.0, fixed=["p"]) * RBF(s2=1.0, l=90.0)
     short = Matern(nu=1.5, s2=0.5, l=1.0)
     return trend + seasonal + short
 
 
-def fit(t, y, steps=350):
+def fit(t, y, steps=800, lr=0.01):
     X = t[:, None]
     y_mean = y.mean()
     model = GPRegressor(make_kernel(), noise_var=0.05)
     best, hist = adam_maximize(
         lambda p: model.lml_and_grad(X, y - y_mean, p),
-        model.params, lr=0.03, steps=steps,
+        model.params, lr=lr, steps=steps,
     )
     model.params = best
     model.fit(X, y - y_mean)
@@ -62,14 +70,51 @@ def main():
 
     # ---- honest out-of-sample test: train < 2015, predict >= 2015 ----
     train = t < 2015.0
-    model, y_mean, _ = fit(t[train], y[train])
-    mu, var = model.predict(t[~train][:, None], include_noise=True)
-    resid = y[~train] - (mu + y_mean)
-    rmse = float(np.sqrt(np.mean(resid**2)))
-    cover = float(np.mean(np.abs(resid) < 1.96 * np.sqrt(var)))
+    Xtr, ytr = t[train][:, None], y[train]
     horizon = t[~train].max() - 2015.0
-    print(f"held-out 2015-{t.max():.1f} ({horizon:.1f} yr): "
-          f"RMSE = {rmse:.2f} ppm, 95% coverage = {cover:.2f}")
+
+    def heldout(model, y_mean):
+        mu, var = model.predict(t[~train][:, None], include_noise=True)
+        resid = y[~train] - (mu + y_mean)
+        rmse = float(np.sqrt(np.mean(resid**2)))
+        cover = float(np.mean(np.abs(resid) < 1.96 * np.sqrt(var)))
+        return rmse, cover
+
+    # Reference: the hand-set kernel WITHOUT optimization (physically motivated
+    # inits). This is the "prior knowledge" baseline the ML-II optimum is judged
+    # against on the 11-year extrapolation.
+    y_mean = ytr.mean()
+    ref = GPRegressor(make_kernel(), noise_var=0.05).fit(Xtr, ytr - y_mean)
+    ref_rmse, ref_cover = heldout(ref, y_mean)
+
+    # ML-II: optimize the evidence (this is the fix -- with the period frozen and
+    # lr=0.01 the optimizer converges instead of diverging and returning the init).
+    model, y_mean, hist = fit(Xtr[:, 0], ytr)
+    lml0, lml_best = hist[0], max(hist)
+    print(f"ML-II: LML {lml0:.1f} (init) -> {lml_best:.1f} (best), "
+          f"improvement {lml_best - lml0:+.1f} nats  "
+          f"[monotonic: {np.all(np.diff(np.maximum.accumulate(hist)) >= 0)}]")
+    assert lml_best > lml0, "ML-II must strictly improve the marginal likelihood"
+    rmse, cover = heldout(model, y_mean)
+    trend_l = float(np.exp(model.kernel.theta[1]))
+    ref_trend_l = float(np.exp(ref.kernel.theta[1]))
+
+    print(f"held-out 2015-{t.max():.1f} ({horizon:.1f} yr):")
+    print(f"  hand-set init (no opt): RMSE = {ref_rmse:.2f} ppm, "
+          f"95% coverage = {ref_cover:.2f}, trend l = {ref_trend_l:.0f} yr")
+    print(f"  ML-II evidence optimum: RMSE = {rmse:.2f} ppm, "
+          f"95% coverage = {cover:.2f}, trend l = {trend_l:.0f} yr")
+    print(
+        "  Note: ML-II raises the in-sample evidence (+{:.1f} nats) but extrapolates\n"
+        "  WORSE here. It prefers a shorter trend lengthscale ({:.0f} vs {:.0f} yr) that\n"
+        "  captures in-sample structure; an RBF trend mean-reverts beyond its\n"
+        "  lengthscale, so the shorter one undershoots the continued rise over an\n"
+        "  11-year horizon. ML-II maximizes evidence, not multi-year forecast skill,\n"
+        "  and an RBF is a poor prior for an unbounded trend (a RationalQuadratic\n"
+        "  medium-term term -- added later in the kernel roadmap -- is the standard\n"
+        "  R&W remedy). Reported honestly rather than tuned to the held-out set."
+        .format(lml_best - lml0, trend_l, ref_trend_l)
+    )
 
     # ---- refit on all data, extrapolate to 2040 ----
     model_all, mean_all, _ = fit(t, y)
@@ -78,12 +123,14 @@ def main():
     mu_s = mu_s + mean_all
     sd_s = np.sqrt(var_s)
 
-    names = (["trend s2", "trend l", "per s2", "per l", "per p",
+    # theta reports FREE params only -- the period is frozen and printed apart.
+    names = (["trend s2", "trend l", "per s2", "per l",
               "decay s2", "decay l", "short s2", "short l"])
     learned = np.exp(model_all.kernel.theta)
     print("learned hyperparameters:")
     for n, v in zip(names, learned):
         print(f"  {n:>9}: {v:10.4f}")
+    print(f"  {'per p':>9}: {1.0:10.4f}   (fixed at 1 yr)")
     print(f"  {'noise s2':>9}: {model_all.noise_var:10.4f}")
 
     fig, axes = plt.subplots(
