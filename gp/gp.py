@@ -44,6 +44,29 @@ def _chol_solve(L, B):
     return np.linalg.solve(L.T, np.linalg.solve(L, B))
 
 
+def sample_prior(kernel, X, n_samples, rng, jitter=1e-8):
+    """Draw sample paths f ~ GP(0, k) evaluated at inputs ``X``.
+
+    The GP prior is, by definition, a zero-mean Gaussian with covariance
+    ``K = k(X, X)`` over any finite set of inputs. Factor ``K = L L^T`` and
+    push standard-normal draws through ``L``: if ``z ~ N(0, I)`` then
+    ``L z ~ N(0, K)``. ``jitter`` (relative to the mean diagonal) is added so
+    the Cholesky succeeds on smooth kernels, whose Gram matrices are only
+    numerically semidefinite when inputs are dense.
+
+    Returns an ``(n_samples, len(X))`` array -- one prior function per row.
+    These are draws from the *prior* (no data conditioned on); the visual
+    point is how kernel choice alone sets sample-path smoothness and structure.
+    """
+    X = np.atleast_2d(np.asarray(X, dtype=float))
+    n = X.shape[0]
+    K = kernel(X, X)
+    K = K + jitter * float(np.mean(np.diag(K))) * np.eye(n)
+    L = np.linalg.cholesky(K)
+    z = rng.standard_normal((n, n_samples))
+    return (L @ z).T
+
+
 class GPRegressor:
     """Zero-mean exact GP regression.
 

@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from gp.gp import GPRegressor
-from gp.kernels import RBF, Matern
+from gp.gp import GPRegressor, sample_prior
+from gp.kernels import RBF, Matern, Periodic
 from gp.optimize import adam_maximize
 
 
@@ -118,3 +118,33 @@ def test_ml2_recovers_known_hyperparameters():
     assert 0.55 < l_hat / true["l"] < 1.6      # lengthscale is well-identified
     assert 0.3 < s2_hat / true["s2"] < 3.0     # variance: weakly identified at n=150
     assert noise_hat < 0.05                    # far below the signal variance
+
+
+def test_sample_prior_shape_and_reproducibility():
+    X = np.linspace(-3, 3, 40)[:, None]
+    s1 = sample_prior(RBF(l=1.0), X, n_samples=5, rng=np.random.default_rng(0))
+    s2 = sample_prior(RBF(l=1.0), X, n_samples=5, rng=np.random.default_rng(0))
+    assert s1.shape == (5, 40)
+    np.testing.assert_allclose(s1, s2)  # same seed -> same draws
+
+
+def test_sample_prior_empirical_covariance_matches_kernel():
+    """Many prior draws must have empirical covariance ~ K(X, X): this is the
+    defining property of the GP prior, and the check that L z is wired right."""
+    X = np.linspace(-2, 2, 12)[:, None]
+    kernel = Matern(nu=1.5, s2=1.3, l=0.7)
+    draws = sample_prior(kernel, X, n_samples=200_000, rng=np.random.default_rng(1))
+    emp = np.cov(draws.T)
+    np.testing.assert_allclose(emp, kernel(X, X), atol=0.03)
+
+
+def test_periodic_prior_draws_are_periodic():
+    """A draw from a Periodic-kernel prior repeats every period: evaluated at
+    x and x + p, the two values coincide within a single sample path (their
+    prior correlation is exactly 1)."""
+    period = 1.3
+    x = np.linspace(0, period, 25, endpoint=False)
+    X = np.concatenate([x, x + period])[:, None]
+    draws = sample_prior(Periodic(l=1.0, p=period), X, 8, np.random.default_rng(2))
+    lo, hi = draws[:, :25], draws[:, 25:]
+    np.testing.assert_allclose(lo, hi, atol=1e-3)  # holds to the ~sqrt(jitter) floor
