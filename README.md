@@ -202,18 +202,43 @@ The point is the left two columns: the from-scratch math is correct to ~1e-10,
 and the ~1.8× overhead is the honest price of readable NumPy over a tuned
 library (timings: single core, best of 3).
 
+### 5. Heteroscedastic noise: a two-stage fit (`experiments/heteroscedastic.py`)
+
+When the noise level varies with $x$, one global $\sigma^2$ can't win: the
+band is too wide where data are clean and too narrow where they are noisy.
+The two-stage remedy (Goldberg et al. 1998) fits a **second GP to the
+log-noise**: take the signal GP's leave-one-out residuals (R&W §5.4.2), fit a
+smooth GP to $\log r_i^2$, undo the $\log\chi^2_1$ bias
+($\mathbb{E}[\log\chi^2_1]=-1.2704$), and refit with the per-point variances
+$\sigma^2(x_i)$ on the diagonal (`fit(..., noise=...)`).
+
+![heteroscedastic](figures/heteroscedastic.png)
+
+The gain is calibration. On data whose noise grows left→right, nominal 95%
+intervals should cover 95% *in every region*:
+
+| | left (clean) 95% cover | right (noisy) 95% cover | test NLL |
+|---|---|---|---|
+| homoscedastic | 1.00 (over-covers) | 0.87 (under-covers) | 0.230 |
+| heteroscedastic | 0.96 | 0.96 | **0.013** |
+
+The single-noise fit splits the difference — too conservative on the left,
+overconfident on the right; the two-stage fit tracks the true noise and is
+well-calibrated across the domain (robust across seeds).
+
 ## Reproduce
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 35 tests; RuntimeWarnings are errors
+pytest                          # 39 tests; RuntimeWarnings are errors
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
 python validate.py              # ~20 s
 python co2.py                   # ~2 min (ML-II on n~700, 9 free params, twice)
 python ntk_experiments.py       # ~30 s
 python sklearn_parity.py        # ~2 s  (parity + speed vs scikit-learn)
+python heteroscedastic.py       # ~3 s  (two-stage input-dependent noise)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
@@ -256,7 +281,8 @@ Rasmussen & Williams (2006) *Gaussian Processes for Machine Learning*
 (conditioning, LML, the CO₂ example); Cho & Saul (2009) (arc-cosine kernels);
 Jacot, Gabriel & Hongler (2018) (the NTK); Lee et al. (2018) / Matthews et al.
 (2018) (NNGP) and Lee et al. (2019) (linearized wide networks); Kingma & Ba
-(2015) (Adam); MacKay (1998) (the periodic kernel via warping). Full list with
+(2015) (Adam); MacKay (1998) (the periodic kernel via warping); Goldberg,
+Williams & Bishop (1998) (the two-stage heteroscedastic GP). Full list with
 roles in [`theory/derivations.md`](theory/derivations.md).
 
 ## Provenance

@@ -204,3 +204,20 @@ def test_heteroscedastic_noise_wrong_shape_raises():
 
     with pytest.raises(ValueError):
         GPRegressor(RBF(), noise_var=0.05).fit(X, y, noise=np.ones(5))
+
+
+def test_two_stage_heteroscedastic_improves_calibration():
+    """The two-stage heteroscedastic fit must beat the homoscedastic one where
+    it matters: lower test NLL, and 95% intervals that actually cover ~95% in
+    the noisy region instead of under-covering it."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from heteroscedastic import evaluate
+
+    m = evaluate(seed=0)
+    assert m["hetero_nll"] < m["homo_nll"]                     # better likelihood
+    homo_right, hetero_right = m["homo_cover"][1], m["hetero_cover"][1]
+    assert homo_right < 0.90                                   # homo under-covers noisy region
+    assert abs(hetero_right - 0.95) < abs(homo_right - 0.95)   # hetero closer to nominal
