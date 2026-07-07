@@ -65,6 +65,24 @@ The library depends on NumPy alone. scikit-learn appears **only in the test
 suite**, as an independent implementation to cross-check posterior means,
 variances, and marginal likelihoods against.
 
+### Kernels set the prior
+
+Before any data is seen, a GP *is* its kernel. Drawing sample paths from the
+zero-mean prior — Cholesky-factor $K = k(X,X)$ and map standard normals,
+$Lz \sim \mathcal N(0, K)$ (`gp.gp.sample_prior`) — shows what each kernel
+assumes about the unknown function. Same lengthscale and variance throughout,
+so only the kernel *family* changes:
+
+![prior samples](figures/prior_samples.png)
+
+The Matérn family is a smoothness dial: $\nu=\tfrac12$ gives continuous but
+nowhere-differentiable paths (Ornstein–Uhlenbeck), $\nu=\tfrac32$ once-
+differentiable, $\nu=\tfrac52$ twice-differentiable, and the RBF (the
+$\nu\to\infty$ limit) infinitely smooth. The Periodic kernel's draws repeat
+exactly — the same construction that lets the CO₂ model above extrapolate a
+seasonal cycle. Derivations of the smoothness ladder are in
+[`theory/derivations.md`](theory/derivations.md) §5.
+
 ## Results
 
 ### 1. Is the uncertainty real? (`experiments/validate.py`)
@@ -171,8 +189,9 @@ Right: a trained finite net (dots) tracking its analytic NTK-regression limit
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 32 tests; RuntimeWarnings are errors
+pytest                          # 35 tests; RuntimeWarnings are errors
 cd experiments
+python prior_samples.py         # ~2 s  (kernel prior gallery)
 python validate.py              # ~20 s
 python co2.py                   # ~2 min (ML-II on n~700, 9 free params, twice)
 python ntk_experiments.py       # ~30 s

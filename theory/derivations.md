@@ -303,7 +303,10 @@ elementary closed form (the Bessel function collapses to
 `exp x polynomial`), which is why the code restricts to
 `nu in {1/2, 3/2, 5/2}`. The practical point: RBF's `C^infinity` paths are
 often *too* smooth for physical data, and the Matern ladder lets you dial in
-exactly how many derivatives the prior should believe in.
+exactly how many derivatives the prior should believe in. This ladder is
+visible directly in prior sample paths — `experiments/prior_samples.py` draws
+from each kernel at a fixed lengthscale (figure in the README): the `nu=1/2`
+draws are visibly jagged and the RBF draws are glassy-smooth.
 
 The `nu -> inf` limit is worth seeing: with `a = sqrt(2 nu) r / l`, the
 leading behavior of the normalized Bessel form is
