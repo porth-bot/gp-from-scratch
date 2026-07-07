@@ -164,3 +164,43 @@ def test_sklearn_parity_benchmark_stays_exact():
         r = compare(n, rng, n_timing=1)
         assert r["mean_maxdiff"] < 1e-6, r
         assert r["std_maxdiff"] < 1e-6, r
+
+
+def test_heteroscedastic_fit_matches_manual_diag_noise_gp():
+    """A per-point noise vector must reproduce the exact-GP posterior with
+    that noise on the diagonal -- checked against a direct linear-algebra
+    computation, and against the scalar path when the vector is constant."""
+    rng = np.random.default_rng(7)
+    X = np.sort(rng.uniform(-3, 3, size=(24, 1)), axis=0)
+    y = np.sin(2 * X[:, 0]) + 0.1 * rng.standard_normal(24)
+    Xs = np.linspace(-3, 3, 40)[:, None]
+    kernel = RBF(s2=1.2, l=0.7)
+
+    noise = 0.01 + 0.2 * (X[:, 0] > 0)  # heteroscedastic: noisier on the right
+    model = GPRegressor(kernel, noise_var=0.05).fit(X, y, noise=noise)
+    mean, var = model.predict(Xs)
+
+    # manual exact GP with diag(noise) on the training block
+    K = kernel(X, X) + np.diag(noise) + 1e-10 * np.mean(np.diag(kernel(X, X))) * np.eye(24)
+    Ks = kernel(X, Xs)
+    L = np.linalg.cholesky(K)
+    alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
+    mean_ref = Ks.T @ alpha
+    v = np.linalg.solve(L, Ks)
+    var_ref = np.diag(kernel(Xs, Xs)) - np.sum(v**2, axis=0)
+    np.testing.assert_allclose(mean, mean_ref, atol=1e-10)
+    np.testing.assert_allclose(var, var_ref, atol=1e-10)
+
+    # constant vector == scalar path
+    m_vec = GPRegressor(kernel, noise_var=0.05).fit(X, y, noise=np.full(24, 0.05))
+    m_scal = GPRegressor(kernel, noise_var=0.05).fit(X, y)
+    np.testing.assert_allclose(m_vec.predict(Xs)[0], m_scal.predict(Xs)[0], atol=1e-12)
+
+
+def test_heteroscedastic_noise_wrong_shape_raises():
+    rng = np.random.default_rng(0)
+    X, y = make_data(rng, n=20)
+    import pytest
+
+    with pytest.raises(ValueError):
+        GPRegressor(RBF(), noise_var=0.05).fit(X, y, noise=np.ones(5))
