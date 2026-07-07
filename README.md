@@ -61,9 +61,10 @@ derived in Sec. 2 and checked against central differences in the tests.
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
 
-The library depends on NumPy alone. scikit-learn appears **only in the test
-suite**, as an independent implementation to cross-check posterior means,
-variances, and marginal likelihoods against.
+The library depends on NumPy alone. scikit-learn appears only as an
+**independent oracle** — in the test suite and in the parity benchmark
+(§4) — never inside the library, to cross-check posterior means, variances,
+and marginal likelihoods against.
 
 ### Kernels set the prior
 
@@ -184,6 +185,23 @@ prediction shrinks with width:
 Right: a trained finite net (dots) tracking its analytic NTK-regression limit
 (line).*
 
+### 4. Parity and speed vs scikit-learn (`experiments/sklearn_parity.py`)
+
+Fitting the *same* kernel at the *same* fixed hyperparameters, our NumPy
+implementation reproduces scikit-learn's exact-GP posterior to floating-point
+parity, at a small constant-factor time cost (both are $O(n^3)$; the ratio is
+implementation overhead, not worse asymptotics):
+
+| $n$ | max&#124;Δmean&#124; | max&#124;Δstd&#124; | ours (ms) | scikit-learn (ms) | ratio |
+|---|---|---|---|---|---|
+| 100 | 1.7e-10 | 1.6e-10 | 0.5 | 0.5 | 1.1× |
+| 400 | 4.2e-11 | 1.2e-10 | 3.4 | 1.9 | 1.8× |
+| 800 | 6.7e-11 | 7.8e-11 | 16.8 | 9.5 | 1.8× |
+
+The point is the left two columns: the from-scratch math is correct to ~1e-10,
+and the ~1.8× overhead is the honest price of readable NumPy over a tuned
+library (timings: single core, best of 3).
+
 ## Reproduce
 
 ```bash
@@ -195,6 +213,7 @@ python prior_samples.py         # ~2 s  (kernel prior gallery)
 python validate.py              # ~20 s
 python co2.py                   # ~2 min (ML-II on n~700, 9 free params, twice)
 python ntk_experiments.py       # ~30 s
+python sklearn_parity.py        # ~2 s  (parity + speed vs scikit-learn)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
