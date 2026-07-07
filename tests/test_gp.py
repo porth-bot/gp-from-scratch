@@ -148,3 +148,19 @@ def test_periodic_prior_draws_are_periodic():
     draws = sample_prior(Periodic(l=1.0, p=period), X, 8, np.random.default_rng(2))
     lo, hi = draws[:, :25], draws[:, 25:]
     np.testing.assert_allclose(lo, hi, atol=1e-3)  # holds to the ~sqrt(jitter) floor
+
+
+def test_sklearn_parity_benchmark_stays_exact():
+    """The sklearn-parity benchmark's core comparison must stay at numerical
+    parity (identical exact-GP math) across sizes, not just at one n."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from sklearn_parity import compare
+
+    rng = np.random.default_rng(0)
+    for n in (50, 150):
+        r = compare(n, rng, n_timing=1)
+        assert r["mean_maxdiff"] < 1e-6, r
+        assert r["std_maxdiff"] < 1e-6, r
