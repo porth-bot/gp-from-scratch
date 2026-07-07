@@ -103,12 +103,30 @@ class GPRegressor:
 
     # -- fitting and prediction ----------------------------------------------
 
-    def fit(self, X, y):
+    def fit(self, X, y, noise=None):
+        """Condition on data.
+
+        noise : optional per-point observation-noise *variance*, shape (n,).
+            Default (None) puts the scalar ``self.noise_var`` on every
+            diagonal entry (homoscedastic, the standard GP). A length-n vector
+            enables **heteroscedastic** regression -- each point gets its own
+            noise variance, e.g. the two-stage estimate in
+            ``experiments/heteroscedastic.py``. The homoscedastic path is
+            numerically unchanged.
+        """
         self.X = np.atleast_2d(np.asarray(X, dtype=float))
         self.y = np.asarray(y, dtype=float)
         n = len(self.y)
         K = self.kernel(self.X, self.X)
-        K = K + (self.noise_var + self.JITTER * float(np.mean(np.diag(K)))) * np.eye(n)
+        jitter = self.JITTER * float(np.mean(np.diag(K)))
+        if noise is None:
+            noise_diag = np.full(n, self.noise_var)
+        else:
+            noise_diag = np.asarray(noise, dtype=float)
+            if noise_diag.shape != (n,):
+                raise ValueError(f"per-point noise must have shape ({n},)")
+        self._noise_diag = noise_diag
+        K = K + np.diag(noise_diag + jitter)
         self.L = np.linalg.cholesky(K)
         self.alpha = _chol_solve(self.L, self.y)
         self._fitted = True
