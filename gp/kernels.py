@@ -240,6 +240,52 @@ class Periodic(Kernel):
         ]
 
 
+class RationalQuadratic(Kernel):
+    """Rational quadratic: k(r) = s2 * (1 + r^2 / (2 alpha l^2))^(-alpha).
+
+    A scale mixture of RBFs: draw an inverse squared-lengthscale from a Gamma
+    distribution (shape alpha) and average the resulting RBFs. It therefore
+    models data whose correlations decay over *several* lengthscales at once,
+    with a heavier-than-Gaussian tail. As alpha -> infinity the mixture
+    concentrates on a single scale and the kernel recovers the RBF exactly
+    (verified in tests) -- alpha is the knob between "one lengthscale" (large)
+    and "many" (small). This is the medium-term flexibility the CO2 model's RBF
+    trend lacked; see the README limitation it addresses.
+
+    theta = (log s2, log l, log alpha). Writing B = 1 + r^2 / (2 alpha l^2) so
+    that K = s2 B^{-alpha}:
+        dK/d(log s2)    = K
+        dK/d(log l)     = K * (r^2 / l^2) / B
+        dK/d(log alpha) = K * ( -alpha ln B + r^2 / (2 l^2 B) )
+    Both r-dependent gradients vanish on the diagonal (r = 0, B = 1) and, in
+    the alpha -> infinity limit, reduce to the RBF's (the log-alpha gradient
+    -> 0, log-l gradient -> K r^2/l^2).
+    """
+
+    names = ("s2", "l", "alpha")
+
+    def __init__(self, s2=1.0, l=1.0, alpha=1.0, fixed=None):
+        self._theta = np.log([s2, l, alpha])
+        self._fixed = self._mask(fixed)
+
+    def _B(self, X1, X2):
+        _, l, alpha = np.exp(self._theta)
+        return 1.0 + sqdist(X1, X2) / (2.0 * alpha * l**2)
+
+    def __call__(self, X1, X2):
+        s2, _, alpha = np.exp(self._theta)
+        return s2 * self._B(X1, X2) ** (-alpha)
+
+    def _grads_full(self, X):
+        _, l, alpha = np.exp(self._theta)
+        d2 = sqdist(X, X)
+        B = 1.0 + d2 / (2.0 * alpha * l**2)
+        K = self(X, X)
+        dlogl = K * (d2 / l**2) / B
+        dlogalpha = K * (-alpha * np.log(B) + d2 / (2.0 * l**2 * B))
+        return [K, dlogl, dlogalpha]
+
+
 class Sum(Kernel):
     """k = k1 + k2; gradients concatenate (linearity)."""
 
