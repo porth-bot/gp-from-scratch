@@ -56,7 +56,7 @@ derived in Sec. 2 and checked against central differences in the tests.
 | Module | Contents |
 |---|---|
 | [`gp/gp.py`](gp/gp.py) | Exact GP regression via Cholesky; posterior mean/variance; log marginal likelihood **and** its analytic gradient (trace identity); never forms $K^{-1}$ for prediction |
-| [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
+| [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
 | [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging |
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
@@ -149,8 +149,10 @@ lengthscale (21 vs 40 yr) that captures in-sample wiggle; an RBF trend
 mean-reverts beyond its lengthscale, so the shorter one undershoots the
 continued rise over a decade. ML-II maximizes evidence, not multi-year
 forecast skill, and an RBF is a poor prior for an unbounded trend. The
-standard R&W remedy — a RationalQuadratic medium-term component — is on the
-kernel roadmap. Reported as measured, not tuned to the held-out set.
+standard R&W remedy — a RationalQuadratic medium-term component (a scale
+mixture of RBFs with a heavier tail) — is now implemented in `gp/kernels.py`
+with its analytic log-space gradients; swapping it into the CO₂ composite is
+the next experiment. Reported as measured, not tuned to the held-out set.
 
 ### 3. Wide networks *are* Gaussian processes (`experiments/ntk_experiments.py`)
 
@@ -268,10 +270,11 @@ Seeds are fixed.
   Random Fourier features (Bochner's theorem) are on the roadmap for the
   $n^3 \to nD^2$ tradeoff.
 - **RBF trend mean-reverts**, which is why ML-II extrapolates the CO₂ series
-  poorly (above). A RationalQuadratic medium-term kernel is the standard fix
-  and is planned.
-- **Isotropic kernels:** ARD (per-dimension lengthscales) and a
-  RationalQuadratic kernel are the next kernel additions.
+  poorly (above). The RationalQuadratic kernel — the standard fix — is now
+  implemented; wiring it into the CO₂ composite and re-measuring the hold-out
+  is the next step.
+- **Isotropic kernels:** ARD (per-dimension lengthscales) is the next kernel
+  addition.
 - **Gaussian likelihood only:** classification (non-Gaussian likelihood) would
   need Laplace or EP, out of scope for this study.
 

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from gp.kernels import RBF, Matern, Periodic, Product, Sum, sqdist
+from gp.kernels import RBF, Matern, Periodic, Product, RationalQuadratic, Sum, sqdist
 
 RNG = np.random.default_rng(0)
 
@@ -32,10 +32,13 @@ ALL_KERNELS = [
     Matern(nu=1.5, s2=0.8, l=1.3),
     Matern(nu=2.5, s2=1.1, l=0.5),
     Periodic(s2=1.2, l=0.8, p=2.3),
+    RationalQuadratic(s2=1.3, l=0.9, alpha=0.5),
+    RationalQuadratic(s2=0.7, l=1.4, alpha=5.0),
     Sum(RBF(s2=1.0, l=0.5), Matern(nu=1.5, s2=0.5, l=2.0)),
     Product(RBF(s2=1.0, l=1.5), Periodic(s2=0.9, l=1.1, p=1.7)),
 ]
-IDS = ["rbf", "matern12", "matern32", "matern52", "periodic", "sum", "product"]
+IDS = ["rbf", "matern12", "matern32", "matern52", "periodic",
+       "rq_alpha0.5", "rq_alpha5", "sum", "product"]
 
 
 @pytest.mark.parametrize("kernel", ALL_KERNELS, ids=IDS)
@@ -69,6 +72,33 @@ def test_periodic_kernel_is_exactly_periodic():
     x = np.array([[0.3]])
     shifted = np.array([[0.3 + 3 * 1.9]])  # three full periods away
     np.testing.assert_allclose(k(x, shifted), k(x, x), rtol=1e-12)
+
+
+def test_rational_quadratic_recovers_rbf_as_alpha_grows():
+    """The RQ kernel is a scale mixture of RBFs; as alpha -> infinity the
+    mixture collapses to a single scale and RQ -> RBF with the same s2, l.
+    Checked both on the covariance and (since the same limit governs the
+    optimizer) on the shared log-s2/log-l gradient blocks."""
+    X = RNG.uniform(-2, 2, size=(8, 1))
+    rbf = RBF(s2=1.3, l=0.9)
+    for alpha, tol in [(50.0, 5e-2), (1e4, 3e-4)]:
+        rq = RationalQuadratic(s2=1.3, l=0.9, alpha=alpha)
+        np.testing.assert_allclose(rq(X, X), rbf(X, X), atol=tol)
+        # log-s2 and log-l gradients converge to the RBF's two gradients
+        for a, b in zip(rq.grads(X)[:2], rbf.grads(X)):
+            np.testing.assert_allclose(a, b, atol=tol)
+
+
+def test_rational_quadratic_heavier_tail_than_rbf():
+    """At equal s2/l, small-alpha RQ decays slower than the RBF at long range
+    (the many-lengthscale mixture keeps more correlation in the tail) -- the
+    property that makes it useful for medium-term structure."""
+    x0 = np.array([[0.0]])
+    far = np.array([[6.0]])
+    s2, l = 1.0, 1.0
+    k_rbf = RBF(s2=s2, l=l)(x0, far).item()
+    k_rq = RationalQuadratic(s2=s2, l=l, alpha=0.5)(x0, far).item()
+    assert k_rq > k_rbf > 0
 
 
 def test_theta_roundtrip_through_composites():
