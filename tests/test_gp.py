@@ -62,6 +62,60 @@ def test_agrees_with_sklearn_oracle():
     )
 
 
+def _brute_force_loo(kernel_factory, noise_var, X, y, noise=None):
+    """Ground truth: literally refit the GP on all points except i and predict
+    the held-out observation (include_noise=True), for every i."""
+    n = len(y)
+    means, vars_ = np.empty(n), np.empty(n)
+    for i in range(n):
+        keep = np.arange(n) != i
+        m = GPRegressor(kernel_factory(), noise_var=noise_var)
+        if noise is None:
+            m.fit(X[keep], y[keep])
+            m_var_i = m.noise_var
+        else:
+            m.fit(X[keep], y[keep], noise=noise[keep])
+            m_var_i = noise[i]
+        mean_i, var_i = m.predict(X[i : i + 1])       # latent band
+        means[i] = mean_i[0]
+        vars_[i] = var_i[0] + m_var_i                 # add back point i's noise
+    return means, vars_
+
+
+def test_closed_form_loo_matches_brute_force_refits():
+    """The R&W 5.4.2 closed form must equal n explicit leave-one-out refits,
+    for both the LOO predictive mean/variance and the log-CV score."""
+    rng = np.random.default_rng(7)
+    X, y = make_data(rng, n=18)
+    kf = lambda: RBF(s2=1.4, l=0.9)
+    model = GPRegressor(kf(), noise_var=0.08).fit(X, y)
+
+    mean, var, log_pred = model.loo()
+    bf_mean, bf_var = _brute_force_loo(kf, 0.08, X, y)
+    np.testing.assert_allclose(mean, bf_mean, rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(var, bf_var, rtol=1e-8, atol=1e-8)
+
+    # per-point log density recomputed from the brute-force predictions
+    bf_log = -0.5 * (np.log(2 * np.pi * bf_var) + (y - bf_mean) ** 2 / bf_var)
+    np.testing.assert_allclose(log_pred, bf_log, rtol=1e-8, atol=1e-8)
+    assert np.isclose(model.loo_log_predictive(), bf_log.sum())
+
+
+def test_closed_form_loo_matches_brute_force_heteroscedastic():
+    """The identity is purely linear-algebraic in K_y, so it holds unchanged
+    when the diagonal carries per-point (heteroscedastic) noise."""
+    rng = np.random.default_rng(8)
+    X, y = make_data(rng, n=15)
+    noise = rng.uniform(0.02, 0.2, size=len(y))
+    kf = lambda: Matern(nu=2.5, s2=1.1, l=0.8)
+    model = GPRegressor(kf(), noise_var=0.05).fit(X, y, noise=noise)
+
+    mean, var, _ = model.loo()
+    bf_mean, bf_var = _brute_force_loo(kf, 0.05, X, y, noise=noise)
+    np.testing.assert_allclose(mean, bf_mean, rtol=1e-7, atol=1e-8)
+    np.testing.assert_allclose(var, bf_var, rtol=1e-7, atol=1e-8)
+
+
 def test_noiseless_gp_interpolates():
     rng = np.random.default_rng(3)
     X, _ = make_data(rng, n=12)

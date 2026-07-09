@@ -150,6 +150,55 @@ class GPRegressor:
             var = var + self.noise_var
         return mean, var
 
+    # -- leave-one-out cross-validation --------------------------------------
+
+    def loo(self):
+        """Closed-form leave-one-out CV predictive distribution.
+
+        For each training point i, the predictive mean and variance of the GP
+        refit on the other n-1 points are available *without* refitting, via
+        the Cholesky factor already computed (Rasmussen & Williams 2006,
+        Sec. 5.4.2, eqs. 5.10-5.12):
+
+            mu_i     = y_i - alpha_i / [K_y^{-1}]_ii
+            sigma^2_i = 1 / [K_y^{-1}]_ii
+
+        where ``alpha = K_y^{-1} y`` (cached from ``fit``) and ``K_y`` is the
+        noisy covariance ``k(X, X) + diag(noise)``. Both come from the single
+        factorization done in ``fit``: naive LOO refits n GPs at O(n^4); this
+        is O(n^3) once, then O(n^2) for the diagonal of ``K_y^{-1}``. Because
+        ``K_y`` already carries the observation noise, ``sigma^2_i`` is an
+        *observation*-level predictive variance -- it matches ``predict(...,
+        include_noise=True)`` on the held-out point, not the latent band.
+
+        The per-point log predictive density is the LOO log-CV score
+        (R&W eq. 5.11), a leakage-free alternative to the marginal likelihood
+        for model selection:
+
+            log p(y_i | X, y_{-i}, theta)
+                = -1/2 [ log(2 pi sigma^2_i) + (y_i - mu_i)^2 / sigma^2_i ].
+
+        Returns
+        -------
+        mean, var, log_pred : each shape (n,) -- the LOO predictive mean,
+        variance, and log predictive density per training point.
+        """
+        assert self._fitted
+        n = len(self.y)
+        inv_diag = np.diag(_chol_solve(self.L, np.eye(n)))
+        var = 1.0 / inv_diag
+        mean = self.y - self.alpha / inv_diag
+        log_pred = -0.5 * (np.log(2.0 * np.pi * var) + (self.y - mean) ** 2 / var)
+        return mean, var, log_pred
+
+    def loo_log_predictive(self):
+        """Total LOO cross-validation log predictive density (R&W eq. 5.11).
+
+        A single scalar model-selection score: higher is better, and unlike the
+        marginal likelihood it never conditions a point on itself.
+        """
+        return float(np.sum(self.loo()[2]))
+
     # -- evidence -------------------------------------------------------------
 
     def log_marginal_likelihood(self):
