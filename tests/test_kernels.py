@@ -3,7 +3,16 @@
 import numpy as np
 import pytest
 
-from gp.kernels import RBF, Matern, Periodic, Product, RationalQuadratic, Sum, sqdist
+from gp.kernels import (
+    ARD,
+    RBF,
+    Matern,
+    Periodic,
+    Product,
+    RationalQuadratic,
+    Sum,
+    sqdist,
+)
 
 RNG = np.random.default_rng(0)
 
@@ -34,11 +43,12 @@ ALL_KERNELS = [
     Periodic(s2=1.2, l=0.8, p=2.3),
     RationalQuadratic(s2=1.3, l=0.9, alpha=0.5),
     RationalQuadratic(s2=0.7, l=1.4, alpha=5.0),
+    ARD(s2=1.4, lengthscales=[0.6]),
     Sum(RBF(s2=1.0, l=0.5), Matern(nu=1.5, s2=0.5, l=2.0)),
     Product(RBF(s2=1.0, l=1.5), Periodic(s2=0.9, l=1.1, p=1.7)),
 ]
 IDS = ["rbf", "matern12", "matern32", "matern52", "periodic",
-       "rq_alpha0.5", "rq_alpha5", "sum", "product"]
+       "rq_alpha0.5", "rq_alpha5", "ard_1d", "sum", "product"]
 
 
 @pytest.mark.parametrize("kernel", ALL_KERNELS, ids=IDS)
@@ -99,6 +109,48 @@ def test_rational_quadratic_heavier_tail_than_rbf():
     k_rbf = RBF(s2=s2, l=l)(x0, far).item()
     k_rq = RationalQuadratic(s2=s2, l=l, alpha=0.5)(x0, far).item()
     assert k_rq > k_rbf > 0
+
+
+# -- ARD (per-dimension lengthscales) -------------------------------------
+
+
+@pytest.mark.parametrize("fixed", [None, ["l1"]], ids=["free", "l1_fixed"])
+def test_ard_gradients_match_finite_differences_multidim(fixed):
+    """Per-dimension log-lengthscale gradients (and log-s2) against central
+    differences on genuinely multi-dimensional input, including a frozen dim."""
+    k = ARD(s2=1.3, lengthscales=[0.5, 1.7, 0.9], fixed=fixed)
+    X = RNG.uniform(-2, 2, size=(8, 3))
+    analytic = k.grads(X)
+    numeric = finite_diff_grads(k, X)
+    assert len(analytic) == len(numeric) == k.n_params
+    for a, n in zip(analytic, numeric):
+        np.testing.assert_allclose(a, n, rtol=1e-5, atol=1e-7)
+
+
+def test_ard_equals_isotropic_rbf_when_lengthscales_equal():
+    """With every l_d set to the same value, ARD is exactly the isotropic RBF
+    (the ARD-weighted distance collapses to the ordinary squared distance)."""
+    X = RNG.uniform(-2, 2, size=(9, 3))
+    ard = ARD(s2=1.6, lengthscales=[0.8, 0.8, 0.8])
+    rbf = RBF(s2=1.6, l=0.8)
+    np.testing.assert_allclose(ard(X, X), rbf(X, X), atol=1e-12)
+
+
+def test_ard_matrices_are_positive_semidefinite_multidim():
+    k = ARD(s2=1.1, lengthscales=[0.7, 2.0])
+    X = RNG.uniform(-3, 3, size=(40, 2))
+    K = k(X, X)
+    np.testing.assert_allclose(K, K.T, atol=1e-12)
+    eigs = np.linalg.eigvalsh(K)
+    assert eigs.min() > -1e-9 * eigs.max()
+
+
+def test_ard_broadcasts_scalar_lengthscale_with_dim():
+    """dim= with a scalar lengthscale builds D equal lengthscales; theta has
+    1 + D entries and n_params counts them all."""
+    k = ARD(s2=1.0, lengthscales=1.0, dim=4)
+    assert k.dim_in == 4 and k.n_params == 5
+    np.testing.assert_allclose(np.exp(k._theta[1:]), np.ones(4))
 
 
 def test_theta_roundtrip_through_composites():
