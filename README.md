@@ -56,7 +56,7 @@ derived in Sec. 2 and checked against central differences in the tests.
 | Module | Contents |
 |---|---|
 | [`gp/gp.py`](gp/gp.py) | Exact GP regression via Cholesky; posterior mean/variance; log marginal likelihood **and** its analytic gradient (trace identity); **closed-form leave-one-out CV** (predictive mean/variance and log-CV score from the *same* factorization — O(n³) once, not n refits; R&W 5.4.2); never forms $K^{-1}$ for prediction |
-| [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
+| [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞), **ARD** (per-dimension lengthscales; → isotropic RBF when equal) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
 | [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging |
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
@@ -228,12 +228,38 @@ The single-noise fit splits the difference — too conservative on the left,
 overconfident on the right; the two-stage fit tracks the true noise and is
 well-calibrated across the domain (robust across seeds).
 
+### 6. ARD: the model discovers which inputs matter (`experiments/ard.py`)
+
+The isotropic RBF forces one lengthscale on every input axis. The **ARD**
+kernel gives each axis its own $\ell_d$, and ML-II turns that into automatic
+feature selection: the marginal likelihood gains nothing from covariance
+structure along an irrelevant axis (it only pays the $\log|K|$ penalty), so the
+optimizer drives that axis's lengthscale up until the kernel is flat along it.
+
+Toy with two inputs where $y = \sin(2x_0) + 0.3x_0 + \varepsilon$ depends on
+$x_0$ **only** ($x_1$ is pure noise). ML-II on an ARD-RBF from an isotropic
+start ($\ell_0=\ell_1=1$):
+
+| | relevant $x_0$ | noise $x_1$ |
+|---|---|---|
+| learned $\ell_d$ | 1.09 | **171** |
+| relevance $1/\ell_d$ | 0.92 | **0.006** |
+
+$x_1$'s lengthscale is driven **157× larger**, so $1/\ell_1 \approx 0$: the
+prediction becomes invariant to $x_1$ (the three $x_1$-slices below coincide).
+Decoupling the axes also raises the evidence — ARD log-marginal-likelihood
+**77.2** vs the isotropic RBF's **13.8** on the same data, because one shared
+lengthscale cannot be both short enough for $x_0$'s wiggle and long enough to
+ignore $x_1$.
+
+<p align="center"><img src="figures/ard_relevance.png" width="820"></p>
+
 ## Reproduce
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 39 tests; RuntimeWarnings are errors
+pytest                          # 55 tests; RuntimeWarnings are errors
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
 python validate.py              # ~20 s
@@ -241,6 +267,7 @@ python co2.py                   # ~2 min (ML-II on n~700, 9 free params, twice)
 python ntk_experiments.py       # ~30 s
 python sklearn_parity.py        # ~2 s  (parity + speed vs scikit-learn)
 python heteroscedastic.py       # ~3 s  (two-stage input-dependent noise)
+python ard.py                   # ~5 s  (per-dimension lengthscales, relevance)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
@@ -273,8 +300,6 @@ Seeds are fixed.
   poorly (above). The RationalQuadratic kernel — the standard fix — is now
   implemented; wiring it into the CO₂ composite and re-measuring the hold-out
   is the next step.
-- **Isotropic kernels:** ARD (per-dimension lengthscales) is the next kernel
-  addition.
 - **Gaussian likelihood only:** classification (non-Gaussian likelihood) would
   need Laplace or EP, out of scope for this study.
 
