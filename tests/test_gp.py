@@ -3,7 +3,7 @@
 import numpy as np
 
 from gp.gp import GPRegressor, sample_prior
-from gp.kernels import RBF, Matern, Periodic
+from gp.kernels import ARD, RBF, Matern, Periodic
 from gp.optimize import adam_maximize
 
 
@@ -172,6 +172,31 @@ def test_ml2_recovers_known_hyperparameters():
     assert 0.55 < l_hat / true["l"] < 1.6      # lengthscale is well-identified
     assert 0.3 < s2_hat / true["s2"] < 3.0     # variance: weakly identified at n=150
     assert noise_hat < 0.05                    # far below the signal variance
+
+
+def test_ml2_ard_suppresses_an_irrelevant_input():
+    """The behavioral ARD claim: with a response that depends only on x0, ML-II
+    on an ARD-RBF drives the irrelevant axis's lengthscale far above the
+    relevant one (1/l1 -> ~0), so predictions become invariant to x1."""
+    rng = np.random.default_rng(3)
+    X = rng.uniform(-3.0, 3.0, size=(120, 2))
+    y = np.sin(2.0 * X[:, 0]) + 0.3 * X[:, 0] + 0.1 * rng.standard_normal(120)
+
+    model = GPRegressor(ARD(s2=1.0, lengthscales=[1.0, 1.0]), noise_var=0.2)
+    best, _ = adam_maximize(
+        lambda p: model.lml_and_grad(X, y, p), model.params, lr=0.05, steps=500
+    )
+    l0, l1 = np.exp(best[1]), np.exp(best[2])
+    assert l1 / l0 > 10.0          # noise axis suppressed by >10x
+    assert l0 < 3.0                # relevant axis keeps a finite, sane scale
+
+    # suppression made concrete: moving x1 barely moves the prediction
+    model.params = best
+    model.fit(X, y)
+    grid0 = np.linspace(-3, 3, 50)
+    m_lo, _ = model.predict(np.column_stack([grid0, np.full(50, -2.0)]))
+    m_hi, _ = model.predict(np.column_stack([grid0, np.full(50, 2.0)]))
+    assert np.max(np.abs(m_lo - m_hi)) < 0.05
 
 
 def test_sample_prior_shape_and_reproducibility():

@@ -152,6 +152,66 @@ class RBF(Kernel):
         return [K, K * d2 / l**2]
 
 
+class ARD(Kernel):
+    """Squared-exponential with one lengthscale per input dimension
+    (Automatic Relevance Determination).
+
+        k(x, x') = s2 * exp( -1/2 sum_d (x_d - x'_d)^2 / l_d^2 )
+
+    The isotropic RBF uses a single l for every dimension; ARD gives each input
+    its own l_d. That turns the kernel into a relevance detector: a large l_d
+    flattens the covariance's dependence on dimension d (the GP becomes nearly
+    constant along it), so ML-II *automatically* suppresses uninformative inputs
+    by driving their lengthscales up. The inverse lengthscales 1/l_d then rank
+    input relevance -- ARD doubles as feature selection (MacKay 1994; Neal 1996;
+    Rasmussen & Williams 2006, Sec. 5.1). With all l_d equal it is exactly the
+    isotropic RBF.
+
+    theta = (log s2, log l_0, ..., log l_{D-1}):
+        dK/d(log s2)  = K
+        dK/d(log l_d) = K * (x_d - x'_d)^2 / l_d^2
+
+    Each lengthscale gradient sees only its own dimension's squared distances,
+    which is what lets ML-II move them independently.
+    """
+
+    def __init__(self, s2=1.0, lengthscales=1.0, dim=None, fixed=None):
+        ls = np.atleast_1d(np.asarray(lengthscales, dtype=float))
+        if dim is not None:
+            if ls.size == 1:
+                ls = np.full(dim, ls.item())
+            elif ls.size != dim:
+                raise ValueError(
+                    f"lengthscales has size {ls.size}, expected dim={dim}"
+                )
+        self.dim_in = ls.size
+        # per-instance names so the fixed-mask machinery can address each l_d
+        self.names = ("s2",) + tuple(f"l{d}" for d in range(self.dim_in))
+        self._theta = np.log(np.concatenate([[s2], ls]))
+        self._fixed = self._mask(fixed)
+
+    def _scaled(self, X):
+        """Divide each input column by its lengthscale (so plain sqdist gives the
+        ARD-weighted squared distance sum_d (x_d - x'_d)^2 / l_d^2)."""
+        l = np.exp(self._theta[1:])
+        return np.atleast_2d(X) / l
+
+    def __call__(self, X1, X2):
+        s2 = np.exp(self._theta[0])
+        return s2 * np.exp(-0.5 * sqdist(self._scaled(X1), self._scaled(X2)))
+
+    def _grads_full(self, X):
+        X = np.atleast_2d(X)
+        l = np.exp(self._theta[1:])
+        K = self(X, X)
+        grads = [K]
+        for d in range(self.dim_in):
+            xd = X[:, d]
+            per_dim_d2 = (xd[:, None] - xd[None, :]) ** 2
+            grads.append(K * per_dim_d2 / l[d] ** 2)
+        return grads
+
+
 class Matern(Kernel):
     """Matern kernel for nu in {0.5, 1.5, 2.5} (the closed-form cases).
 
