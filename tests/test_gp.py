@@ -153,6 +153,56 @@ def test_posterior_is_calibrated_on_gp_samples():
     assert 0.90 < coverage < 0.985, coverage
 
 
+def _bump_field(P):
+    x, y = P[:, 0], P[:, 1]
+    return (
+        np.exp(-((x - 1.0) ** 2 + (y - 1.0) ** 2))
+        - 0.6 * np.exp(-((x + 1.2) ** 2 + (y + 0.8) ** 2) / 1.5)
+    )
+
+
+def test_2d_spatial_gp_recovers_a_scattered_field():
+    """A GP on 2D inputs interpolates a smooth field from scattered noisy
+    samples: held-out RMSE well below the field amplitude, and the 95% band
+    covers the latent surface. (The experiments/spatial2d.py figure.)"""
+    rng = np.random.default_rng(0)
+    noise = 0.05
+    Xtr = rng.uniform(-3, 3, size=(140, 2))
+    ytr = _bump_field(Xtr) + noise * rng.standard_normal(140)
+
+    model = GPRegressor(RBF(s2=0.5, l=1.0), noise_var=noise ** 2)
+    best, _ = adam_maximize(
+        lambda p: model.lml_and_grad(Xtr, ytr, p), model.params, lr=0.05, steps=300
+    )
+    model.params = best
+    model.fit(Xtr, ytr)
+
+    Xte = rng.uniform(-3, 3, size=(500, 2))
+    truth = _bump_field(Xte)
+    mean, var = model.predict(Xte)
+    rmse = np.sqrt(np.mean((mean - truth) ** 2))
+    cover = np.mean(np.abs(truth - mean) / np.sqrt(var) <= 1.96)
+    assert rmse < 0.1                 # amplitude ~1, so this is a tight fit
+    assert 0.90 < cover <= 1.0
+
+
+def test_2d_predictive_variance_grows_away_from_data():
+    """The core spatial-GP claim: uncertainty is small near observations and
+    relaxes to the prior variance far from all of them. Train only in the
+    lower-left quadrant, then compare the variance near the data vs in the
+    empty opposite corner."""
+    rng = np.random.default_rng(1)
+    Xtr = rng.uniform(-3.0, -1.0, size=(80, 2))  # data confined to one corner
+    ytr = np.sin(Xtr[:, 0]) + np.cos(Xtr[:, 1])
+    s2 = 1.0
+    model = GPRegressor(RBF(s2=s2, l=1.0), noise_var=1e-3).fit(Xtr, ytr)
+
+    _, v_near = model.predict(np.array([[-2.0, -2.0]]))  # inside the cluster
+    _, v_far = model.predict(np.array([[2.5, 2.5]]))     # far away
+    assert v_far[0] > 5 * v_near[0]        # far is much less certain
+    assert abs(v_far[0] - s2) < 0.05 * s2  # and has relaxed to the prior var
+
+
 def test_ml2_recovers_known_hyperparameters():
     """Sample data FROM a GP with known (s2, l, noise); maximizing the
     marginal likelihood from a generic init must land near the truth."""

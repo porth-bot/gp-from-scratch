@@ -254,12 +254,32 @@ ignore $x_1$.
 
 <p align="center"><img src="figures/ard_relevance.png" width="820"></p>
 
+### 7. A 2D spatial GP: interpolation *and* honest uncertainty (`experiments/spatial2d.py`)
+
+The GP story is clearest in 2D, where both the posterior mean and the posterior
+**standard deviation** are surfaces you can look at. We sample a smooth two-bump
+field on $[-3,3]^2$ at 140 scattered locations with noise sd $0.05$, fit an
+isotropic RBF by ML-II, and predict on a dense grid:
+
+| | value |
+|---|---|
+| held-out RMSE (field amplitude $\approx 1$) | **0.027** |
+| latent 95% coverage on the grid | **0.973** |
+| posterior sd, near data → gaps/edges | **0.019 → 0.113** |
+
+The point is the third row (panel **c**): a GP does not just interpolate, it
+reports *where it is guessing* — the standard deviation collapses at each
+observation and swells in the gaps and past the domain edges, relaxing toward
+the prior. That is the uncertainty a plain interpolator cannot give you.
+
+<p align="center"><img src="figures/spatial2d.png" width="1000"></p>
+
 ## Reproduce
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 55 tests; RuntimeWarnings are errors
+pytest                          # 57 tests; RuntimeWarnings are errors
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
 python validate.py              # ~20 s
@@ -268,6 +288,7 @@ python ntk_experiments.py       # ~30 s
 python sklearn_parity.py        # ~2 s  (parity + speed vs scikit-learn)
 python heteroscedastic.py       # ~3 s  (two-stage input-dependent noise)
 python ard.py                   # ~5 s  (per-dimension lengthscales, relevance)
+python spatial2d.py             # ~5 s  (2D field: mean + uncertainty surfaces)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
