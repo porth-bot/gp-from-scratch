@@ -20,3 +20,8 @@ jobs:
       # against scikit-learn (an independent oracle), so install the dev extra.
       - run: pip install -e ".[dev]"
       - run: pytest -q
+      # Static type check of the public package. Run only on 3.12: the mypy
+      # step consumes numpy's bundled stubs, which now use 3.12-only syntax.
+      - name: type check (mypy)
+        if: matrix.python-version == '3.12'
+        run: mypy

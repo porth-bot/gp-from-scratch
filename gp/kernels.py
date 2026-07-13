@@ -22,10 +22,18 @@ from linearity and the product rule. Observation noise is NOT a kernel here
 -- it belongs to the likelihood and lives in ``GPRegressor`` (gp.py).
 """
 
+from __future__ import annotations
+
+from typing import Iterable, Optional
+
 import numpy as np
 
+# What ``fixed=`` accepts: nothing, an iterable of parameter names, or a
+# boolean mask the length of ``_theta`` (see ``Kernel._mask``).
+FixedArg = Optional[Iterable]
 
-def sqdist(X1, X2):
+
+def sqdist(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
     """Pairwise squared Euclidean distances, (n1, n2).
 
     ||a - b||^2 = ||a||^2 + ||b||^2 - 2 a.b, clipped at 0 to kill the tiny
@@ -66,9 +74,22 @@ class Kernel:
     (the default) the behavior is identical to a plain unconstrained kernel.
     """
 
-    names: tuple = ()
+    names: tuple[str, ...] = ()
 
-    def _mask(self, fixed):
+    # Declared here so the base methods (``free``, ``theta``, ``grads``) type-
+    # check; every leaf kernel assigns them in ``__init__``.
+    _theta: np.ndarray
+    _fixed: np.ndarray
+
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        """The covariance matrix K = k(X1, X2). Overridden by every leaf."""
+        raise NotImplementedError
+
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+        """dK/dtheta_i for *all* params (before the fixed mask). Overridden."""
+        raise NotImplementedError
+
+    def _mask(self, fixed: FixedArg) -> np.ndarray:
         """Build the boolean fixed-mask from ``fixed`` (called by subclasses).
 
         ``fixed`` may be None (nothing fixed), an iterable of parameter names
@@ -94,33 +115,33 @@ class Kernel:
         return mask
 
     @property
-    def free(self):
+    def free(self) -> np.ndarray:
         """Boolean mask of the trainable (non-fixed) parameters."""
         return ~self._fixed
 
     @property
-    def theta(self):
+    def theta(self) -> np.ndarray:
         return self._theta[self.free].copy()
 
     @theta.setter
-    def theta(self, value):
+    def theta(self, value: np.ndarray) -> None:
         value = np.asarray(value, dtype=float)
         assert value.shape == self._theta[self.free].shape
         self._theta[self.free] = value
 
     @property
-    def n_params(self):
+    def n_params(self) -> int:
         return int(self.free.sum())
 
-    def grads(self, X):
+    def grads(self, X: np.ndarray) -> list[np.ndarray]:
         """dK/dtheta_i for the free parameters, in ``theta`` order."""
         full = self._grads_full(X)
         return [g for g, fixed in zip(full, self._fixed) if not fixed]
 
-    def __add__(self, other):
+    def __add__(self, other: "Kernel") -> "Sum":
         return Sum(self, other)
 
-    def __mul__(self, other):
+    def __mul__(self, other: "Kernel") -> "Product":
         return Product(self, other)
 
 
@@ -137,15 +158,15 @@ class RBF(Kernel):
 
     names = ("s2", "l")
 
-    def __init__(self, s2=1.0, l=1.0, fixed=None):
+    def __init__(self, s2: float = 1.0, l: float = 1.0, fixed: FixedArg = None):
         self._theta = np.log([s2, l])
         self._fixed = self._mask(fixed)
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         s2, l = np.exp(self._theta)
         return s2 * np.exp(-0.5 * sqdist(X1, X2) / l**2)
 
-    def _grads_full(self, X):
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
         _, l = np.exp(self._theta)
         d2 = sqdist(X, X)
         K = self(X, X)
@@ -175,7 +196,13 @@ class ARD(Kernel):
     which is what lets ML-II move them independently.
     """
 
-    def __init__(self, s2=1.0, lengthscales=1.0, dim=None, fixed=None):
+    def __init__(
+        self,
+        s2: float = 1.0,
+        lengthscales: object = 1.0,
+        dim: Optional[int] = None,
+        fixed: FixedArg = None,
+    ):
         ls = np.atleast_1d(np.asarray(lengthscales, dtype=float))
         if dim is not None:
             if ls.size == 1:
@@ -190,17 +217,17 @@ class ARD(Kernel):
         self._theta = np.log(np.concatenate([[s2], ls]))
         self._fixed = self._mask(fixed)
 
-    def _scaled(self, X):
+    def _scaled(self, X: np.ndarray) -> np.ndarray:
         """Divide each input column by its lengthscale (so plain sqdist gives the
         ARD-weighted squared distance sum_d (x_d - x'_d)^2 / l_d^2)."""
         l = np.exp(self._theta[1:])
         return np.atleast_2d(X) / l
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         s2 = np.exp(self._theta[0])
         return s2 * np.exp(-0.5 * sqdist(self._scaled(X1), self._scaled(X2)))
 
-    def _grads_full(self, X):
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
         X = np.atleast_2d(X)
         l = np.exp(self._theta[1:])
         K = self(X, X)
@@ -229,29 +256,30 @@ class Matern(Kernel):
 
     names = ("s2", "l")
 
-    def __init__(self, nu=1.5, s2=1.0, l=1.0, fixed=None):
+    def __init__(self, nu: float = 1.5, s2: float = 1.0, l: float = 1.0,
+                 fixed: FixedArg = None):
         if nu not in (0.5, 1.5, 2.5):
             raise ValueError("closed forms exist for nu in {0.5, 1.5, 2.5}")
         self.nu = nu
         self._theta = np.log([s2, l])
         self._fixed = self._mask(fixed)
 
-    def _a(self, X1, X2):
+    def _a(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         _, l = np.exp(self._theta)
         return np.sqrt(2.0 * self.nu) * np.sqrt(sqdist(X1, X2)) / l
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         s2, _ = np.exp(self._theta)
         a = self._a(X1, X2)
         if self.nu == 0.5:
-            poly = 1.0
+            poly = np.ones_like(a)
         elif self.nu == 1.5:
             poly = 1.0 + a
         else:
             poly = 1.0 + a + a**2 / 3.0
         return s2 * poly * np.exp(-a)
 
-    def _grads_full(self, X):
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
         s2, _ = np.exp(self._theta)
         a = self._a(X, X)
         e = np.exp(-a)
@@ -279,16 +307,17 @@ class Periodic(Kernel):
 
     names = ("s2", "l", "p")
 
-    def __init__(self, s2=1.0, l=1.0, p=1.0, fixed=None):
+    def __init__(self, s2: float = 1.0, l: float = 1.0, p: float = 1.0,
+                 fixed: FixedArg = None):
         self._theta = np.log([s2, l, p])
         self._fixed = self._mask(fixed)
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         s2, l, p = np.exp(self._theta)
         r = np.sqrt(sqdist(X1, X2))
         return s2 * np.exp(-2.0 * np.sin(np.pi * r / p) ** 2 / l**2)
 
-    def _grads_full(self, X):
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
         _, l, p = np.exp(self._theta)
         r = np.sqrt(sqdist(X, X))
         K = self(X, X)
@@ -324,19 +353,20 @@ class RationalQuadratic(Kernel):
 
     names = ("s2", "l", "alpha")
 
-    def __init__(self, s2=1.0, l=1.0, alpha=1.0, fixed=None):
+    def __init__(self, s2: float = 1.0, l: float = 1.0, alpha: float = 1.0,
+                 fixed: FixedArg = None):
         self._theta = np.log([s2, l, alpha])
         self._fixed = self._mask(fixed)
 
-    def _B(self, X1, X2):
+    def _B(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         _, l, alpha = np.exp(self._theta)
         return 1.0 + sqdist(X1, X2) / (2.0 * alpha * l**2)
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         s2, _, alpha = np.exp(self._theta)
         return s2 * self._B(X1, X2) ** (-alpha)
 
-    def _grads_full(self, X):
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
         _, l, alpha = np.exp(self._theta)
         d2 = sqdist(X, X)
         B = 1.0 + d2 / (2.0 * alpha * l**2)
@@ -349,53 +379,53 @@ class RationalQuadratic(Kernel):
 class Sum(Kernel):
     """k = k1 + k2; gradients concatenate (linearity)."""
 
-    def __init__(self, k1, k2):
+    def __init__(self, k1: Kernel, k2: Kernel):
         self.k1, self.k2 = k1, k2
 
     @property
-    def theta(self):
+    def theta(self) -> np.ndarray:
         return np.concatenate([self.k1.theta, self.k2.theta])
 
     @theta.setter
-    def theta(self, value):
+    def theta(self, value: np.ndarray) -> None:
         n1 = self.k1.n_params
         self.k1.theta = value[:n1]
         self.k2.theta = value[n1:]
 
     @property
-    def n_params(self):
+    def n_params(self) -> int:
         return self.k1.n_params + self.k2.n_params
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         return self.k1(X1, X2) + self.k2(X1, X2)
 
-    def grads(self, X):
+    def grads(self, X: np.ndarray) -> list[np.ndarray]:
         return self.k1.grads(X) + self.k2.grads(X)
 
 
 class Product(Kernel):
     """k = k1 * k2 (elementwise); product rule: dK = dK1 * K2 + K1 * dK2."""
 
-    def __init__(self, k1, k2):
+    def __init__(self, k1: Kernel, k2: Kernel):
         self.k1, self.k2 = k1, k2
 
     @property
-    def theta(self):
+    def theta(self) -> np.ndarray:
         return np.concatenate([self.k1.theta, self.k2.theta])
 
     @theta.setter
-    def theta(self, value):
+    def theta(self, value: np.ndarray) -> None:
         n1 = self.k1.n_params
         self.k1.theta = value[:n1]
         self.k2.theta = value[n1:]
 
     @property
-    def n_params(self):
+    def n_params(self) -> int:
         return self.k1.n_params + self.k2.n_params
 
-    def __call__(self, X1, X2):
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         return self.k1(X1, X2) * self.k2(X1, X2)
 
-    def grads(self, X):
+    def grads(self, X: np.ndarray) -> list[np.ndarray]:
         K1, K2 = self.k1(X, X), self.k2(X, X)
         return [g * K2 for g in self.k1.grads(X)] + [K1 * g for g in self.k2.grads(X)]

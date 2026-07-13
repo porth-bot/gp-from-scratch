@@ -32,12 +32,14 @@ As k -> infinity (with lr < 2 / lambda_max) this is exact kernel
 ("ridgeless") regression with the NTK, plus the transient from f_0.
 """
 
+from __future__ import annotations
+
 import numpy as np
 
 from .nn import _augment
 
 
-def _angles(U, V):
+def _angles(U: np.ndarray, V: np.ndarray) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
     """cos(theta) matrix between rows of U and V, clipped into [-1, 1]."""
     nu = np.linalg.norm(U, axis=1)
     nv = np.linalg.norm(V, axis=1)
@@ -45,32 +47,40 @@ def _angles(U, V):
     return np.clip(c, -1.0, 1.0), nu, nv
 
 
-def kappa0(X1, X2):
+def kappa0(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
     U, V = _augment(X1), _augment(X2)
     c, _, _ = _angles(U, V)
     theta = np.arccos(c)
     return (np.pi - theta) / (2.0 * np.pi)
 
 
-def kappa1(X1, X2):
+def kappa1(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
     U, V = _augment(X1), _augment(X2)
     c, nu, nv = _angles(U, V)
     theta = np.arccos(c)
     return np.outer(nu, nv) * (np.sin(theta) + (np.pi - theta) * c) / (2.0 * np.pi)
 
 
-def nngp_kernel(X1, X2):
+def nngp_kernel(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
     """Covariance of the network's outputs at initialization (m -> inf)."""
     return 2.0 * kappa1(X1, X2)
 
 
-def ntk_kernel(X1, X2):
+def ntk_kernel(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
     """The neural tangent kernel of the two-layer ReLU network (m -> inf)."""
     U, V = _augment(X1), _augment(X2)
     return 2.0 * kappa1(X1, X2) + 2.0 * kappa0(X1, X2) * (U @ V.T)
 
 
-def gd_prediction(X_train, y_train, X_test, f0_train, f0_test, lr, steps):
+def gd_prediction(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    f0_train: np.ndarray,
+    f0_test: np.ndarray,
+    lr: float,
+    steps: int,
+) -> np.ndarray:
     """Closed-form test-set predictions of linearized GD after ``steps`` steps.
 
     Requires lr < 2 / lambda_max(Theta) for the geometric series to converge

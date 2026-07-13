@@ -280,6 +280,7 @@ the prior. That is the uncertainty a plain interpolator cannot give you.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                          # 57 tests; RuntimeWarnings are errors
+mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
 python validate.py              # ~20 s

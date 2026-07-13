@@ -17,11 +17,25 @@ Adam (Kingma & Ba 2015), ascent form:
     theta_t = theta_{t-1} + lr * m_hat / (sqrt(v_hat) + eps)
 """
 
+from __future__ import annotations
+
+from typing import Callable, Optional
+
 import numpy as np
 
+ValueAndGrad = Callable[[np.ndarray], "tuple[float, np.ndarray]"]
+Callback = Callable[[int, np.ndarray, float], None]
 
-def adam_maximize(value_and_grad, theta0, lr=0.05, steps=300,
-                  betas=(0.9, 0.999), eps=1e-8, callback=None):
+
+def adam_maximize(
+    value_and_grad: ValueAndGrad,
+    theta0: np.ndarray,
+    lr: float = 0.05,
+    steps: int = 300,
+    betas: tuple[float, float] = (0.9, 0.999),
+    eps: float = 1e-8,
+    callback: Optional[Callback] = None,
+) -> "tuple[np.ndarray, list[float]]":
     """Maximize a function of theta given ``value_and_grad(theta) -> (v, g)``.
 
     Returns (best_theta, history) where history is the list of values per
@@ -33,7 +47,7 @@ def adam_maximize(value_and_grad, theta0, lr=0.05, steps=300,
     v = np.zeros_like(theta)
     b1, b2 = betas
     best_val, best_theta = -np.inf, theta.copy()
-    history = []
+    history: list[float] = []
     for t in range(1, steps + 1):
         val, g = value_and_grad(theta)
         history.append(val)
