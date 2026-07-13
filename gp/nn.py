@@ -28,31 +28,33 @@ The empirical NTK is the parameter-gradient Gram matrix:
                      = (2/m) [ sum_i h_i h_i'  +  (x~ . x~') sum_i a_i^2 s_i s_i' ].
 """
 
+from __future__ import annotations
+
 import numpy as np
 
 
-def _augment(X):
+def _augment(X: np.ndarray) -> np.ndarray:
     X = np.atleast_2d(np.asarray(X, dtype=float))
     return np.hstack([X, np.ones((X.shape[0], 1))])
 
 
 class TwoLayerReLU:
-    def __init__(self, width, rng):
+    def __init__(self, width: int, rng: np.random.Generator):
         self.m = width
         self.W = rng.standard_normal((width, 2))  # rows w_i, acting on (x, 1)
         self.a = rng.standard_normal(width)
         self.scale = np.sqrt(2.0 / width)
 
-    def _pre(self, X):
+    def _pre(self, X: np.ndarray) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
         """Preactivations Z (n, m) and hidden H, gate S."""
         Z = _augment(X) @ self.W.T
         return Z, np.maximum(Z, 0.0), (Z > 0).astype(float)
 
-    def forward(self, X):
+    def forward(self, X: np.ndarray) -> np.ndarray:
         _, H, _ = self._pre(X)
         return self.scale * H @ self.a
 
-    def loss_grads(self, X, y):
+    def loss_grads(self, X: np.ndarray, y: np.ndarray) -> "tuple[np.ndarray, np.ndarray]":
         """Gradients of L = 1/2 ||f - y||^2 w.r.t. (a, W)."""
         Xa = _augment(X)
         Z = Xa @ self.W.T
@@ -63,12 +65,12 @@ class TwoLayerReLU:
         g_W = self.scale * ((S * r[:, None]).T * self.a[:, None]) @ Xa  # (m, 2)
         return g_a, g_W
 
-    def gd_step(self, X, y, lr):
+    def gd_step(self, X: np.ndarray, y: np.ndarray, lr: float) -> None:
         g_a, g_W = self.loss_grads(X, y)
         self.a -= lr * g_a
         self.W -= lr * g_W
 
-    def empirical_ntk(self, X1, X2):
+    def empirical_ntk(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         """<grad_params f(x), grad_params f(x')> -- converges to the analytic
         NTK as width -> infinity (verified in tests at finite width)."""
         Xa1, Xa2 = _augment(X1), _augment(X2)

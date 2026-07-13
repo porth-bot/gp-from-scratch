@@ -36,15 +36,28 @@ through log|K|. The gradient, derived in theory/derivations.md Sec. 2:
 Noise enters as theta_noise = log sigma^2 with dK/d(log sigma^2) = sigma^2 I.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
+
 import numpy as np
 
+if TYPE_CHECKING:
+    from gp.kernels import Kernel
 
-def _chol_solve(L, B):
+
+def _chol_solve(L: np.ndarray, B: np.ndarray) -> np.ndarray:
     """Solve (L L^T) x = B via two triangular solves (never form the inverse)."""
     return np.linalg.solve(L.T, np.linalg.solve(L, B))
 
 
-def sample_prior(kernel, X, n_samples, rng, jitter=1e-8):
+def sample_prior(
+    kernel: "Kernel",
+    X: np.ndarray,
+    n_samples: int,
+    rng: np.random.Generator,
+    jitter: float = 1e-8,
+) -> np.ndarray:
     """Draw sample paths f ~ GP(0, k) evaluated at inputs ``X``.
 
     The GP prior is, by definition, a zero-mean Gaussian with covariance
@@ -80,7 +93,7 @@ class GPRegressor:
 
     JITTER = 1e-10
 
-    def __init__(self, kernel, noise_var=0.1):
+    def __init__(self, kernel: "Kernel", noise_var: float = 0.1):
         self.kernel = kernel
         self.log_noise = float(np.log(noise_var))
         self._fitted = False
@@ -88,22 +101,23 @@ class GPRegressor:
     # -- parameter vector: kernel theta plus log noise -----------------------
 
     @property
-    def params(self):
+    def params(self) -> np.ndarray:
         return np.concatenate([self.kernel.theta, [self.log_noise]])
 
     @params.setter
-    def params(self, value):
+    def params(self, value: np.ndarray) -> None:
         self.kernel.theta = value[:-1]
         self.log_noise = float(value[-1])
         self._fitted = False
 
     @property
-    def noise_var(self):
+    def noise_var(self) -> float:
         return float(np.exp(self.log_noise))
 
     # -- fitting and prediction ----------------------------------------------
 
-    def fit(self, X, y, noise=None):
+    def fit(self, X: np.ndarray, y: np.ndarray,
+            noise: Optional[np.ndarray] = None) -> "GPRegressor":
         """Condition on data.
 
         noise : optional per-point observation-noise *variance*, shape (n,).
@@ -132,7 +146,8 @@ class GPRegressor:
         self._fitted = True
         return self
 
-    def predict(self, Xs, include_noise=False):
+    def predict(self, Xs: np.ndarray,
+                include_noise: bool = False) -> "tuple[np.ndarray, np.ndarray]":
         """Posterior mean and pointwise variance at Xs.
 
         include_noise=False gives the credible band for the latent f;
@@ -152,7 +167,7 @@ class GPRegressor:
 
     # -- leave-one-out cross-validation --------------------------------------
 
-    def loo(self):
+    def loo(self) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
         """Closed-form leave-one-out CV predictive distribution.
 
         For each training point i, the predictive mean and variance of the GP
@@ -191,7 +206,7 @@ class GPRegressor:
         log_pred = -0.5 * (np.log(2.0 * np.pi * var) + (self.y - mean) ** 2 / var)
         return mean, var, log_pred
 
-    def loo_log_predictive(self):
+    def loo_log_predictive(self) -> float:
         """Total LOO cross-validation log predictive density (R&W eq. 5.11).
 
         A single scalar model-selection score: higher is better, and unlike the
@@ -201,7 +216,7 @@ class GPRegressor:
 
     # -- evidence -------------------------------------------------------------
 
-    def log_marginal_likelihood(self):
+    def log_marginal_likelihood(self) -> float:
         assert self._fitted
         n = len(self.y)
         return float(
@@ -210,7 +225,8 @@ class GPRegressor:
             - 0.5 * n * np.log(2.0 * np.pi)
         )
 
-    def lml_and_grad(self, X, y, params=None):
+    def lml_and_grad(self, X: np.ndarray, y: np.ndarray,
+                     params: Optional[np.ndarray] = None) -> "tuple[float, np.ndarray]":
         """Log marginal likelihood and its gradient w.r.t. ``self.params``.
 
         Gradient: 1/2 tr[(alpha alpha^T - K^{-1}) dK/dtheta_j] for each kernel
