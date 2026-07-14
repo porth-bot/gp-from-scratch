@@ -56,7 +56,7 @@ derived in Sec. 2 and checked against central differences in the tests.
 | Module | Contents |
 |---|---|
 | [`gp/gp.py`](gp/gp.py) | Exact GP regression via Cholesky; posterior mean/variance; log marginal likelihood **and** its analytic gradient (trace identity); **closed-form leave-one-out CV** (predictive mean/variance and log-CV score from the *same* factorization — O(n³) once, not n refits; R&W 5.4.2); never forms $K^{-1}$ for prediction |
-| [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞), **ARD** (per-dimension lengthscales; → isotropic RBF when equal) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
+| [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞), **ARD** (per-dimension lengthscales; → isotropic RBF when equal), **Gibbs** (nonstationary — input-dependent lengthscale $\ell(x)=e^{a+bx}$, PSD for any positive $\ell(\cdot)$; → RBF exactly when $b=0$) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
 | [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging |
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
@@ -274,12 +274,63 @@ the prior. That is the uncertainty a plain interpolator cannot give you.
 
 <p align="center"><img src="figures/spatial2d.png" width="1000"></p>
 
+### 8. When one lengthscale is not enough (`experiments/gibbs_kernel.py`)
+
+Every kernel above is **stationary**: $k(x,x')$ depends only on $x-x'$, so one
+lengthscale governs the whole input space. The **Gibbs (1997) kernel** relaxes
+that — let $\ell(x)$ vary with the input, and
+
+$$k(x,x') = \sigma_f^2 \sqrt{\frac{2\,\ell(x)\ell(x')}{\ell(x)^2+\ell(x')^2}}
+\;\exp\!\Big(\frac{-(x-x')^2}{\ell(x)^2+\ell(x')^2}\Big)$$
+
+is PSD for *any* positive $\ell(\cdot)$. The square-root prefactor is what buys
+that: it damps the covariance between two points that disagree about the
+lengthscale. With $\ell$ constant it equals 1 and the whole thing collapses to
+the RBF exactly (tested). We take $\ell(x) = e^{a+bx}$, so the tilt $b$ is
+learned by ML-II like any other hyperparameter.
+
+The target is a **chirp**, $y=\sin(x^3)+\varepsilon$ on $[0,2.2]$ — nearly flat
+on the left, oscillating hard on the right, a ~20× spread of local lengthscale
+inside one dataset. ML-II recovers exactly that ($n=60$):
+
+| | learned lengthscale | log evidence |
+|---|---|---|
+| RBF (stationary) | $\ell = 0.183$, one number for the whole domain | 23.97 |
+| **Gibbs** | $\ell(0)=1.55 \to \ell(2.2)=0.13$ (**11.8×** range) | **32.34** (**+8.4 nats**) |
+
+**But does it predict better? Only when data is scarce** — and this is the
+honest part. The evidence prefers Gibbs at every sample size, but a stationary
+RBF is not helpless: it copes by picking the *short* lengthscale the rough
+region demands ($0.18$, versus the $1.55$ the smooth region wants) and then
+leaning on sheer data density to interpolate the smooth half anyway. That crutch
+only exists while the data is dense:
+
+| $n$ | evidence gap | smooth-region RMSE (Gibbs / RBF) | held-out NLL (Gibbs / RBF) |
+|---|---|---|---|
+| 40 | +5.5 nats | **0.105** / 0.128 | **−0.754** / −0.635 |
+| 60 | +8.4 nats | **0.106** / 0.111 | **−0.786** / −0.744 |
+| 90 | +10.8 nats | 0.092 / 0.093 | −0.906 / −0.891 |
+| 140 | +11.3 nats | 0.110 / 0.112 | −0.868 / −0.848 |
+
+So the claim is *not* "nonstationary kernels predict better". It is that a
+stationary kernel pays for its wrong lengthscale **in the currency of data**,
+and you only notice when data is what you are short of. At $n=140$ the two are
+indistinguishable to three decimals; at $n=40$ the Gibbs kernel cuts
+smooth-region RMSE by ~18%.
+
+Scope, honestly: $\ell(x)=e^{a+bx}$ is *monotone*, which is the right shape for
+a chirp and the wrong one for (say) a single localized bump. A richer $\ell(\cdot)$
+— a second GP on $\log \ell$, as in Paciorek & Schervish (2004) — is the natural
+extension and is **not** implemented here. 1D input only.
+
+<p align="center"><img src="figures/gibbs_kernel.png" width="1000"></p>
+
 ## Reproduce
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 57 tests; RuntimeWarnings are errors
+pytest                          # 67 tests; RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
@@ -290,6 +341,7 @@ python sklearn_parity.py        # ~2 s  (parity + speed vs scikit-learn)
 python heteroscedastic.py       # ~3 s  (two-stage input-dependent noise)
 python ard.py                   # ~5 s  (per-dimension lengthscales, relevance)
 python spatial2d.py             # ~5 s  (2D field: mean + uncertainty surfaces)
+python gibbs_kernel.py          # ~15 s (nonstationary: input-dependent lengthscale)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
@@ -332,8 +384,9 @@ Rasmussen & Williams (2006) *Gaussian Processes for Machine Learning*
 Jacot, Gabriel & Hongler (2018) (the NTK); Lee et al. (2018) / Matthews et al.
 (2018) (NNGP) and Lee et al. (2019) (linearized wide networks); Kingma & Ba
 (2015) (Adam); MacKay (1998) (the periodic kernel via warping); Goldberg,
-Williams & Bishop (1998) (the two-stage heteroscedastic GP). Full list with
-roles in [`theory/derivations.md`](theory/derivations.md).
+Williams & Bishop (1998) (the two-stage heteroscedastic GP); Gibbs (1997) and
+Paciorek & Schervish (2004) (the nonstationary input-dependent-lengthscale
+kernel). Full list with roles in [`theory/derivations.md`](theory/derivations.md).
 
 ## Provenance
 
