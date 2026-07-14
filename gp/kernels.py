@@ -376,6 +376,114 @@ class RationalQuadratic(Kernel):
         return [K, dlogl, dlogalpha]
 
 
+class Gibbs(Kernel):
+    """Nonstationary kernel with an input-dependent lengthscale (Gibbs 1997).
+
+    Every other kernel here is *stationary*: k(x, x') depends only on x - x',
+    so one lengthscale governs the whole input space. That is a real modeling
+    assumption, and it is often wrong -- a function can be flat on the left and
+    oscillate on the right, and a stationary GP must then compromise, choosing
+    one lengthscale that is too short for the smooth region (bands too wide,
+    posterior mean too wiggly) and too long for the rough one (structure
+    smoothed away).
+
+    Gibbs (1997) gives the fix in 1D. Let ``l(x) > 0`` vary with the input; then
+
+        k(x, x') = s2 * sqrt( 2 l(x) l(x') / (l(x)^2 + l(x')^2) )
+                      * exp( -(x - x')^2 / (l(x)^2 + l(x')^2) )
+
+    is positive semi-definite for *any* positive ``l(.)``. (It is not a hack:
+    the construction comes from a product of Gaussian basis functions whose
+    widths vary with position, and the prefactor is exactly the normalizer that
+    keeps it a valid covariance. Paciorek & Schervish 2004 generalize it to any
+    stationary base kernel and to higher dimensions.) The prefactor is what does
+    the work: it damps the covariance between two points that disagree about the
+    lengthscale, which is what makes the whole thing PSD rather than merely
+    plausible.
+
+    Two properties worth checking against the formula. On the diagonal
+    ``x = x'``, the prefactor is ``sqrt(2 l^2 / 2 l^2) = 1`` and the exponent is
+    0, so ``k(x, x) = s2`` everywhere -- the kernel is unit-variance-normalized
+    regardless of how ``l`` varies. And if ``l`` is *constant*, the prefactor is
+    1 and ``l(x)^2 + l(x')^2 = 2 l^2``, so it collapses to
+    ``s2 exp(-r^2 / (2 l^2))``, this repo's :class:`RBF` exactly (tested).
+
+    Lengthscale parameterization. This prototype takes the simplest genuinely
+    nonstationary choice, log-linear in the input:
+
+        l(x) = exp(a + b x)
+
+    which is positive by construction, has clean gradients, and -- at b = 0 --
+    reduces to a constant lengthscale ``e^a``, giving the exact RBF limit above.
+    ``b`` is the tilt: negative means the function gets rougher as x increases.
+    A monotone lengthscale is the right shape for a chirp-like target and the
+    wrong one for a bump; a richer ``l(.)`` (a second GP on log l, as in
+    Paciorek & Schervish) is the natural extension and is *not* implemented
+    here. 1D input only; the constructor rejects anything else rather than
+    silently doing the wrong thing.
+
+    theta = (log s2, a, b), with ``a`` already a log-lengthscale. Writing
+    ``l = l(x)``, ``l' = l(x')``, ``S = l^2 + l'^2``, ``d = x - x'``:
+
+        d(log k)/dl = 1/(2l) - l/S + 2 l d^2 / S^2
+
+    (and symmetrically in l'), and since ``dl/da = l`` and ``dl/db = x l``, the
+    two chain-rule factors
+
+        A  = l  * d(log k)/dl  = 1/2 - l^2/S  + 2 l^2  d^2/S^2
+        A' = l' * d(log k)/dl' = 1/2 - l'^2/S + 2 l'^2 d^2/S^2
+
+    give
+
+        dK/d(log s2) = K
+        dK/da        = K * (A + A')
+        dK/db        = K * (x A + x' A')
+
+    Sanity check of that algebra against the RBF limit: at b = 0 (so l = l' = L,
+    S = 2L^2) both A and A' collapse to ``d^2 / (2 L^2)``, hence
+    ``dK/da = K d^2 / L^2`` -- precisely :class:`RBF`'s ``dK/d(log l)``, as it
+    must be. The gradients are finite-difference-checked in the tests anyway.
+    """
+
+    names = ("s2", "a", "b")
+
+    def __init__(self, s2: float = 1.0, a: float = 0.0, b: float = 0.0,
+                 fixed: FixedArg = None):
+        self._theta = np.array([np.log(s2), float(a), float(b)], dtype=float)
+        self._fixed = self._mask(fixed)
+
+    def lengthscale(self, X: np.ndarray) -> np.ndarray:
+        """l(x) = exp(a + b x), shape (n,). Public so experiments can plot it."""
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2 or X.shape[1] != 1:
+            raise ValueError("Gibbs kernel is 1D only: X must have shape (n, 1)")
+        _, a, b = self._theta
+        return np.exp(a + b * X[:, 0])
+
+    def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        s2 = np.exp(self._theta[0])
+        l1 = self.lengthscale(X1)[:, None]  # (n1, 1)
+        l2 = self.lengthscale(X2)[None, :]  # (1, n2)
+        S = l1**2 + l2**2
+        d = X1[:, 0][:, None] - X2[:, 0][None, :]
+        prefactor = np.sqrt(2.0 * l1 * l2 / S)
+        return s2 * prefactor * np.exp(-(d**2) / S)
+
+    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+        l = self.lengthscale(X)
+        l1 = l[:, None]
+        l2 = l[None, :]
+        S = l1**2 + l2**2
+        x1 = X[:, 0][:, None]
+        x2 = X[:, 0][None, :]
+        d2 = (x1 - x2) ** 2
+
+        K = self(X, X)
+        A = 0.5 - l1**2 / S + 2.0 * l1**2 * d2 / S**2
+        A2 = 0.5 - l2**2 / S + 2.0 * l2**2 * d2 / S**2
+        return [K, K * (A + A2), K * (x1 * A + x2 * A2)]
+
+
 class Sum(Kernel):
     """k = k1 + k2; gradients concatenate (linearity)."""
 

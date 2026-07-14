@@ -6,6 +6,7 @@ import pytest
 from gp.kernels import (
     ARD,
     RBF,
+    Gibbs,
     Matern,
     Periodic,
     Product,
@@ -44,11 +45,14 @@ ALL_KERNELS = [
     RationalQuadratic(s2=1.3, l=0.9, alpha=0.5),
     RationalQuadratic(s2=0.7, l=1.4, alpha=5.0),
     ARD(s2=1.4, lengthscales=[0.6]),
+    Gibbs(s2=1.3, a=0.0, b=-0.4),
+    Gibbs(s2=0.9, a=0.3, b=0.6),
     Sum(RBF(s2=1.0, l=0.5), Matern(nu=1.5, s2=0.5, l=2.0)),
     Product(RBF(s2=1.0, l=1.5), Periodic(s2=0.9, l=1.1, p=1.7)),
 ]
 IDS = ["rbf", "matern12", "matern32", "matern52", "periodic",
-       "rq_alpha0.5", "rq_alpha5", "ard_1d", "sum", "product"]
+       "rq_alpha0.5", "rq_alpha5", "ard_1d", "gibbs_tilt_down", "gibbs_tilt_up",
+       "sum", "product"]
 
 
 @pytest.mark.parametrize("kernel", ALL_KERNELS, ids=IDS)
@@ -220,3 +224,92 @@ def test_fixed_mask_accepts_boolean_array_and_rejects_bad_names():
     np.testing.assert_allclose(kb.theta, np.log([0.7]))
     with pytest.raises(ValueError):
         Periodic(fixed=["period"])  # not a valid param name
+
+
+# ---------------------------------------------------------------------------
+# Gibbs (nonstationary, input-dependent lengthscale)
+# ---------------------------------------------------------------------------
+def test_gibbs_recovers_rbf_exactly_when_the_lengthscale_is_constant():
+    """b = 0 makes l(x) = e^a constant, and the kernel must collapse to RBF.
+
+    The Gibbs prefactor sqrt(2 l l' / (l^2 + l'^2)) becomes 1 and the exponent
+    -(d^2)/(l^2 + l'^2) becomes -d^2/(2 l^2) -- this repo's RBF convention on
+    the nose. If this fails, the prefactor or the factor of 2 is wrong.
+    """
+    X = RNG.uniform(-3, 3, size=(25, 1))
+    for s2, a in [(1.0, 0.0), (2.3, -0.4), (0.6, 1.1)]:
+        gibbs = Gibbs(s2=s2, a=a, b=0.0)
+        rbf = RBF(s2=s2, l=np.exp(a))
+        np.testing.assert_allclose(gibbs(X, X), rbf(X, X), rtol=1e-12, atol=1e-14)
+
+
+def test_gibbs_log_lengthscale_gradient_reduces_to_the_rbf_gradient_at_b_zero():
+    # dK/da must equal RBF's dK/d(log l) when the lengthscale is constant --
+    # the analytic cross-check quoted in the Gibbs docstring.
+    X = RNG.uniform(-2, 2, size=(12, 1))
+    gibbs = Gibbs(s2=1.4, a=0.2, b=0.0)
+    rbf = RBF(s2=1.4, l=np.exp(0.2))
+    np.testing.assert_allclose(gibbs.grads(X)[1], rbf.grads(X)[1], rtol=1e-10)
+
+
+def test_gibbs_is_unit_variance_normalized_however_the_lengthscale_varies():
+    # k(x, x) = s2 for every x, even where l(x) is changing fast: the prefactor
+    # is exactly the normalizer that makes this true.
+    X = RNG.uniform(-4, 4, size=(30, 1))
+    k = Gibbs(s2=1.7, a=0.0, b=-0.9)
+    np.testing.assert_allclose(np.diag(k(X, X)), 1.7, rtol=1e-12)
+
+
+def test_gibbs_correlates_less_where_the_lengthscale_is_shorter():
+    """The behavioral content: same separation, weaker correlation where rough.
+
+    With b < 0 the lengthscale shrinks as x grows, so a pair of points a fixed
+    distance apart should be *less* correlated out at large x than at small x.
+    That is the whole reason to use this kernel.
+    """
+    k = Gibbs(s2=1.0, a=0.0, b=-0.8)  # l(x) = exp(-0.8 x): shrinks with x
+    gap = 0.3
+    corr = []
+    for centre in (-2.0, 0.0, 2.0):
+        X = np.array([[centre - gap / 2], [centre + gap / 2]])
+        corr.append(k(X, X)[0, 1])
+    assert corr[0] > corr[1] > corr[2]  # rougher (shorter l) as x increases
+    assert corr[2] < 0.5 * corr[0]
+
+
+def test_gibbs_rejects_multidimensional_input():
+    k = Gibbs()
+    with pytest.raises(ValueError):
+        k(RNG.uniform(size=(5, 2)), RNG.uniform(size=(5, 2)))
+
+
+def test_gibbs_ml_ii_recovers_the_tilt_and_beats_rbf_on_a_chirp():
+    """On data whose roughness genuinely varies, ML-II should find it.
+
+    sin(x^3) is a chirp: its local wavelength shrinks monotonically with x, so
+    a monotone lengthscale is exactly the right shape and a stationary RBF must
+    compromise. The evidence should prefer Gibbs, and the learned tilt b should
+    be negative (lengthscale shrinking as x grows).
+    """
+    from gp.gp import GPRegressor
+    from gp.optimize import adam_maximize
+
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0.0, 2.2, size=(120, 1))
+    y = np.sin(X[:, 0] ** 3) + 0.1 * rng.standard_normal(120)
+
+    def fit(kernel):
+        m = GPRegressor(kernel, noise_var=0.1)
+        best, _ = adam_maximize(
+            lambda p: m.lml_and_grad(X, y, p), m.params, lr=0.05, steps=400
+        )
+        m.params = best
+        m.fit(X, y)
+        return m
+
+    gibbs = fit(Gibbs(s2=1.0, a=0.0, b=0.0))
+    rbf = fit(RBF(s2=1.0, l=1.0))
+
+    b = gibbs.kernel._theta[2]
+    assert b < -0.2  # lengthscale shrinks with x, as the chirp demands
+    assert gibbs.log_marginal_likelihood() > rbf.log_marginal_likelihood() + 5.0
