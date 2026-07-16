@@ -72,6 +72,29 @@ class Kernel:
     ``__call__`` always uses the full ``_theta``, so a fixed parameter keeps
     its constructed value in every covariance evaluation. With nothing fixed
     (the default) the behavior is identical to a plain unconstrained kernel.
+
+    Examples
+    --------
+    A Periodic kernel with its period pinned to 1 (the CO2 case: a year is a
+    year). The optimizer sees two free parameters instead of three, and
+    ``grads`` returns one entry per free parameter, in ``theta`` order:
+
+    >>> import numpy as np
+    >>> k = Periodic(s2=1.0, l=1.0, p=1.0, fixed=["p"])
+    >>> k.names
+    ('s2', 'l', 'p')
+    >>> k.n_params                      # p is frozen, so only s2 and l
+    2
+    >>> X = np.linspace(0, 2, 4).reshape(-1, 1)
+    >>> len(k.grads(X))
+    2
+
+    Setting ``theta`` touches only the free entries -- the frozen period keeps
+    its constructed value, and the covariance still sees it:
+
+    >>> k.theta = np.log([4.0, 2.0])    # new s2, l (log space)
+    >>> np.exp(k._theta).round(3)       # s2, l updated; p untouched
+    array([4., 2., 1.])
     """
 
     names: tuple[str, ...] = ()
@@ -485,7 +508,24 @@ class Gibbs(Kernel):
 
 
 class Sum(Kernel):
-    """k = k1 + k2; gradients concatenate (linearity)."""
+    """k = k1 + k2; gradients concatenate (linearity).
+
+    Independent additive processes add their kernels, which is what lets the
+    CO2 model be *read off the physics* (trend + season + short-term).
+    Composition is via ``+``, and the composite's theta is the concatenation
+    of its parts' free parameters -- a frozen one stays invisible to the
+    optimizer through the composite too:
+
+    >>> import numpy as np
+    >>> k = RBF(s2=1.0, l=1.0) + Periodic(s2=1.0, l=1.0, p=1.0, fixed=["p"])
+    >>> k.n_params                      # RBF's 2 + Periodic's free 2
+    4
+    >>> X = np.linspace(0, 2, 4).reshape(-1, 1)
+    >>> bool(np.allclose(k(X, X), RBF()(X, X) + Periodic()(X, X)))
+    True
+    >>> len(k.grads(X))                 # one gradient per free parameter
+    4
+    """
 
     def __init__(self, k1: Kernel, k2: Kernel):
         self.k1, self.k2 = k1, k2

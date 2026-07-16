@@ -41,6 +41,24 @@ def adam_maximize(
     Returns (best_theta, history) where history is the list of values per
     step and best_theta is the iterate with the highest value seen (the
     last iterate of a fixed-step run is not guaranteed to be the best).
+
+    Examples
+    --------
+    Maximize a concave quadratic whose argmax is known: ``f(theta) =
+    -||theta - [1, -2]||^2``, so ``grad = -2 (theta - [1, -2])``.
+
+    >>> import numpy as np
+    >>> target = np.array([1.0, -2.0])
+    >>> def value_and_grad(theta):
+    ...     d = theta - target
+    ...     return -float(d @ d), -2.0 * d
+    >>> best, history = adam_maximize(value_and_grad, np.zeros(2), lr=0.1, steps=500)
+    >>> bool(np.allclose(best, target, atol=1e-3))
+    True
+    >>> len(history)
+    500
+    >>> bool(history[-1] > history[0])       # it climbed
+    True
     """
     theta = np.asarray(theta0, dtype=float).copy()
     m = np.zeros_like(theta)
