@@ -62,12 +62,40 @@ def kappa1(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
 
 
 def nngp_kernel(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
-    """Covariance of the network's outputs at initialization (m -> inf)."""
+    """Covariance of the network's outputs at initialization (m -> inf).
+
+    Examples
+    --------
+    A point against itself has angle theta = 0, where both arc-cosine kernels
+    collapse to exact rationals: ``kappa1 = ||u||^2 (0 + pi) / 2pi = 1/2`` and
+    ``kappa0 = (pi - 0) / 2pi = 1/2`` for the augmented unit input
+    ``u = [0, 1]``. So the NNGP variance is exactly 1:
+
+    >>> import numpy as np
+    >>> X = np.array([[0.0]])                # augmented to [0, 1], norm 1
+    >>> float(nngp_kernel(X, X)[0, 0])       # 2 * kappa1 = 2 * 1/2
+    1.0
+    """
     return 2.0 * kappa1(X1, X2)
 
 
 def ntk_kernel(X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
-    """The neural tangent kernel of the two-layer ReLU network (m -> inf)."""
+    """The neural tangent kernel of the two-layer ReLU network (m -> inf).
+
+    Examples
+    --------
+    At the same theta = 0 point, ``NTK = 2 kappa1 + 2 kappa0 (u . u)
+    = 1 + 2 * (1/2) * 1 = 2`` exactly -- the NTK exceeds the NNGP because
+    training moves the hidden layer too, and the W-gradients contribute the
+    second term:
+
+    >>> import numpy as np
+    >>> X = np.array([[0.0]])
+    >>> float(ntk_kernel(X, X)[0, 0])
+    2.0
+    >>> bool(ntk_kernel(X, X)[0, 0] > nngp_kernel(X, X)[0, 0])
+    True
+    """
     U, V = _augment(X1), _augment(X2)
     return 2.0 * kappa1(X1, X2) + 2.0 * kappa0(X1, X2) * (U @ V.T)
 

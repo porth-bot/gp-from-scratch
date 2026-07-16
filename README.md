@@ -330,7 +330,7 @@ extension and is **not** implemented here. 1D input only.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 67 tests; RuntimeWarnings are errors
+pytest                          # 75 tests (incl. 8 docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
@@ -354,6 +354,12 @@ Seeds are fixed.
   likelihood are cross-checked against scikit-learn's `GaussianProcessRegressor`
   on shared data; kernels are verified PSD; the frozen-parameter mask is tested
   to zero exactly the right gradient entries.
+- **The docs are executable.** The public API's docstring examples are run by
+  pytest (`--doctest-modules`), and each recovers a known answer rather than
+  printing a plausible-looking number — the LOO example checks the closed form
+  against an actual brute-force refit, and the NTK example lands on the exact
+  rationals the arc-cosine kernels give at $\theta = 0$. Documentation that
+  drifts from the code fails CI.
 - **The inverse is never formed for prediction.** One Cholesky gives the mean
   (two triangular solves), the pointwise variance (a solve against $K_*$), and
   the log-determinant (a diagonal sum) at once. $K^{-1}$ is materialized only

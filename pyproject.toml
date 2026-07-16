@@ -18,6 +18,12 @@ dev = ["pytest>=7.0", "matplotlib>=3.7", "scikit-learn>=1.3", "mypy>=1.8"]
 include = ["gp*"]
 
 [tool.pytest.ini_options]
+# Run the unit tests AND the docstring examples. --doctest-modules is scoped
+# to the (numpy-only) gp package and tests via testpaths, so the doctests never
+# try to import experiments-only deps like matplotlib -- keeping CI green.
+addopts = "--doctest-modules"
+testpaths = ["gp", "tests"]
+# numerical sloppiness (overflow, invalid ops) fails tests instead of hiding
 filterwarnings = ["error::RuntimeWarning"]
 
 [tool.mypy]

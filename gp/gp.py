@@ -70,6 +70,21 @@ def sample_prior(
     Returns an ``(n_samples, len(X))`` array -- one prior function per row.
     These are draws from the *prior* (no data conditioned on); the visual
     point is how kernel choice alone sets sample-path smoothness and structure.
+
+    Examples
+    --------
+    The draws really do have covariance ``K``: with enough of them, the
+    empirical covariance converges to the kernel matrix.
+
+    >>> import numpy as np
+    >>> from gp.kernels import RBF
+    >>> X = np.linspace(0, 1, 5).reshape(-1, 1)
+    >>> rng = np.random.default_rng(0)
+    >>> F = sample_prior(RBF(s2=2.0, l=0.5), X, n_samples=20000, rng=rng)
+    >>> F.shape
+    (20000, 5)
+    >>> bool(np.allclose(np.cov(F.T), RBF(s2=2.0, l=0.5)(X, X), atol=0.1))
+    True
     """
     X = np.atleast_2d(np.asarray(X, dtype=float))
     n = X.shape[0]
@@ -89,6 +104,27 @@ class GPRegressor:
     noise_var : float
         Initial observation-noise variance sigma^2 (optimized in log space
         alongside the kernel's theta when using gp.optimize).
+
+    Examples
+    --------
+    Fit five noiseless samples of ``sin`` and predict. With tiny noise the
+    posterior mean passes through the data, and the posterior standard
+    deviation collapses at an observed input but is large far away, where the
+    GP falls back on the prior (here ``s2 = 1``):
+
+    >>> import numpy as np
+    >>> from gp.kernels import RBF
+    >>> X = np.linspace(0, np.pi, 5).reshape(-1, 1)
+    >>> y = np.sin(X).ravel()
+    >>> gp = GPRegressor(RBF(s2=1.0, l=1.0), noise_var=1e-8).fit(X, y)
+    >>> mean, var = gp.predict(X)
+    >>> bool(np.allclose(mean, y, atol=1e-4))        # interpolates the data
+    True
+    >>> bool(np.sqrt(var).max() < 1e-3)              # certain where it has data
+    True
+    >>> _, var_far = gp.predict(np.array([[100.0]]))  # far from every input
+    >>> bool(np.isclose(var_far[0], 1.0, atol=1e-6))  # relaxes to the prior s2
+    True
     """
 
     JITTER = 1e-10
@@ -197,6 +233,26 @@ class GPRegressor:
         -------
         mean, var, log_pred : each shape (n,) -- the LOO predictive mean,
         variance, and log predictive density per training point.
+
+        Examples
+        --------
+        The identity is worth distrusting until you have seen it beat the
+        brute force it replaces. Hold out point 0 by actually refitting on the
+        other n-1 points, and compare against the closed form -- which never
+        refits anything:
+
+        >>> import numpy as np
+        >>> from gp.kernels import RBF
+        >>> X = np.linspace(0, 3, 8).reshape(-1, 1)
+        >>> y = np.sin(X).ravel()
+        >>> gp = GPRegressor(RBF(s2=1.0, l=1.0), noise_var=0.1).fit(X, y)
+        >>> mean, var, log_pred = gp.loo()
+        >>> refit = GPRegressor(RBF(s2=1.0, l=1.0), noise_var=0.1).fit(X[1:], y[1:])
+        >>> m0, v0 = refit.predict(X[:1], include_noise=True)
+        >>> bool(np.isclose(mean[0], m0[0]) and np.isclose(var[0], v0[0]))
+        True
+        >>> log_pred.shape
+        (8,)
         """
         assert self._fitted
         n = len(self.y)
