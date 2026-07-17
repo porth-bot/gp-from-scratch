@@ -394,6 +394,29 @@ Williams & Bishop (1998) (the two-stage heteroscedastic GP); Gibbs (1997) and
 Paciorek & Schervish (2004) (the nonstationary input-dependent-lengthscale
 kernel). Full list with roles in [`theory/derivations.md`](theory/derivations.md).
 
+## Part of a from-scratch series
+
+Same bar in each: the core written out by hand, every non-obvious claim checked
+against a closed form or an independent oracle, limitations stated rather than
+buried.
+
+| Repo | Built from scratch |
+| --- | --- |
+| **gp-from-scratch** *(this repo)* | GP regression, kernels with hand-derived gradients, ML-II, and the NTK/NNGP wide-network correspondence |
+| [mcmc-from-scratch](https://github.com/porth-bot/mcmc-from-scratch) | Metropolis-Hastings, Gibbs, HMC, MALA, parallel tempering — validated against exact posteriors |
+| [grokking-transformer](https://github.com/porth-bot/grokking-transformer) | A transformer that groks modular arithmetic, and the Fourier circuit it learns |
+| [pinn-from-scratch](https://github.com/porth-bot/pinn-from-scratch) | Physics-informed networks: exact autograd PDE residuals against closed-form solutions |
+
+The NTK stack in section 3 is what the other two lean on, which makes the links
+real rather than decorative. pinn-from-scratch's spectral-bias result — a
+physics-informed network fits low frequencies first, and stalls on high ones
+until random Fourier features flatten the spectrum — is the $(1-\eta\lambda_i)^s$
+contraction derived here in [`theory/derivations.md`](theory/derivations.md)
+§6–7, applied to a PDE residual. And mcmc-from-scratch's Bayesian-neural-network
+experiment is the other side of section 3's coin: infinite width gives the
+closed-form posterior computed here, finite width has none, so it samples the
+weight posterior with HMC instead.
+
 ## Provenance
 
 Built as a study resource: implemented from scratch with AI assistance
