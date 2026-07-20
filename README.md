@@ -154,6 +154,63 @@ mixture of RBFs with a heavier tail) — is now implemented in `gp/kernels.py`
 with its analytic log-space gradients; swapping it into the CO₂ composite is
 the next experiment. Reported as measured, not tuned to the held-out set.
 
+#### Building that kernel, step by step
+
+The composite above is not a black box — it is four physical assumptions, each
+one a kernel, combined with `+` and `×`. Two composition rules are all you
+need, both a consequence of what a kernel *is* (a covariance):
+
+- **Independent processes add.** If $y = f_1 + f_2$ with $f_1 \perp f_2$, then
+  $\operatorname{Cov}(y) = \operatorname{Cov}(f_1) + \operatorname{Cov}(f_2)$, so
+  $k = k_1 + k_2$. `Sum` (and the `k1 + k2` operator) does exactly this.
+- **Modulation multiplies.** The covariance of a product of independent
+  processes is the product of their covariances, so $k = k_1 \times k_2$ lets one
+  kernel *gate* another. `Product` (and `k1 * k2`).
+
+Read the physics off the Mauna Loa curve and translate each clause:
+
+```python
+from gp.kernels import RBF, Matern, Periodic
+
+# 1. A smooth, decades-long rising trend. RBF, big amplitude (sd 50 ppm),
+#    long lengthscale (40 yr) so it is nearly constant across a few years.
+trend    = RBF(s2=50.0**2, l=40.0)
+
+# 2. An annual cycle whose SHAPE drifts slowly. Periodic gives the exact
+#    12-month repeat (period frozen at 1 yr); multiplying by a long RBF
+#    (l=90 yr) lets this year's cycle differ a little from a cycle decades away.
+seasonal = Periodic(s2=4.0, l=1.3, p=1.0, fixed=["p"]) * RBF(s2=1.0, l=90.0)
+
+# 3. Short-term correlated "weather". Matern-3/2, lengthscale ~1 yr, decays fast.
+short    = Matern(nu=1.5, s2=0.5, l=1.0)
+
+kernel = trend + seasonal + short           # a Sum of (RBF, Product, Matern)
+```
+
+The tree carries its own free-parameter bookkeeping, so ML-II optimizes it
+without you tracking indices — `Sum`/`Product` split the flat `theta` vector by
+each child's `n_params`, and a `fixed=` parameter simply disappears from the
+count:
+
+```python
+>>> trend.n_params, seasonal.n_params, short.n_params   # Periodic's p is frozen
+(2, 4, 2)
+>>> kernel.n_params                                     # 8 free (+ noise_var = 9)
+8
+```
+
+Every number in the composite has a reading you can check numerically. The
+prior variance at a point is the sum of the parts (`k(x,x) = 2500 + 4 + 0.5 =
+2504.5` ppm²). The `seasonal` term is worth watching because it is the product:
+at a **half-year** gap the annual cycle is in antiphase, so its covariance
+collapses (`4.0 → 1.22`); at a **full year** it is back in phase (`≈ 4.0`); and
+even **ten years** apart it is still `≈ 3.98`, because the RBF envelope
+($\ell=90$ yr) has barely decayed — that is precisely "same-shaped season,
+drifting by a hair per decade." The `short` Matérn, by contrast, falls from
+`0.24` at one year to `0.017` at three: weather, not climate. Add them and you
+have a prior that already *looks like* the data before a single hyperparameter
+is optimized — which is why the hand-set kernel forecasts as well as it does (§2).
+
 ### 3. Wide networks *are* Gaussian processes (`experiments/ntk_experiments.py`)
 
 The same GP math predicts the behavior of a neural network. For a
