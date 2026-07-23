@@ -1,10 +1,11 @@
 """GP regression: LML gradient check, sklearn oracle, interpolation, calibration."""
 
 import numpy as np
+import pytest
 
 from gp.gp import GPRegressor, sample_prior
 from gp.kernels import ARD, RBF, Matern, Periodic
-from gp.optimize import adam_maximize
+from gp.optimize import adam_maximize, maximize_lml_multistart
 
 
 def make_data(rng, n=25):
@@ -350,3 +351,86 @@ def test_two_stage_heteroscedastic_improves_calibration():
     homo_right, hetero_right = m["homo_cover"][1], m["hetero_cover"][1]
     assert homo_right < 0.90                                   # homo under-covers noisy region
     assert abs(hetero_right - 0.95) < abs(homo_right - 0.95)   # hetero closer to nominal
+
+
+# -- ML-II multi-restart (defeating LML multimodality) -----------------------
+
+def _multimodal_1d():
+    """A 12-point set whose RBF+noise evidence has two competing optima: a
+    short-lengthscale "it's signal" mode and a long-lengthscale "it's all
+    noise" mode (Rasmussen & Williams Fig. 5.5). Sparse samples of a wiggly
+    function make both explanations locally credible."""
+    rng = np.random.default_rng(0)
+    X = np.linspace(-4, 4, 12).reshape(-1, 1)
+    y = np.sin(1.7 * X).ravel() + 0.15 * rng.standard_normal(12)
+    return X, y
+
+
+# log-space box for [log s2, log l, log noise_var] used by the restarts.
+_BOX = np.log([[1e-2, 1e2], [1e-1, 1e2], [1e-4, 1e0]])
+
+
+def _single_fit(l0, noise0, X, y, steps=400):
+    m = GPRegressor(RBF(s2=1.0, l=l0), noise_var=noise0)
+    best, _ = adam_maximize(lambda p: m.lml_and_grad(X, y, p), m.params,
+                            lr=0.05, steps=steps)
+    return m.lml_and_grad(X, y, best)[0], np.exp(m.kernel.theta[1])  # lml, l
+
+
+def test_lml_surface_is_actually_multimodal():
+    """Guard the premise: two initializations must land in genuinely different
+    optima (different evidence AND different lengthscale), or the multi-restart
+    test below would be vacuous."""
+    X, y = _multimodal_1d()
+    lml_signal, l_signal = _single_fit(0.3, 0.1, X, y)   # short-l basin
+    lml_noise, l_noise = _single_fit(30.0, 0.6, X, y)    # long-l "all noise" basin
+    assert lml_signal > lml_noise + 1.0                  # distinct optima
+    assert l_noise > 5.0 * l_signal                      # and distinct lengthscales
+
+
+def test_multistart_escapes_a_bad_starting_basin():
+    """Started in the bad (long-lengthscale) basin, a single fit stays stuck;
+    multi-start over the log-space box finds the far better signal explanation
+    and leaves the model conditioned there."""
+    X, y = _multimodal_1d()
+    stuck_lml, _ = _single_fit(30.0, 0.6, X, y)
+
+    model = GPRegressor(RBF(s2=1.0, l=30.0), noise_var=0.6)
+    res = maximize_lml_multistart(model, X, y, n_restarts=8, bounds=_BOX,
+                                  rng=np.random.default_rng(0), steps=400)
+    assert res.lml > stuck_lml + 1.0                     # escaped the bad basin
+    assert res.lml == np.max(res.lmls)                   # reported the best restart
+    # model is left fit at the winner: its own LML matches the reported value
+    assert np.isclose(model.log_marginal_likelihood(), res.lml)
+    assert model._fitted
+
+
+def test_multistart_keeps_a_good_init_when_it_is_already_best():
+    """With keep_init=True restart 0 is the model's own params, so multi-start
+    can never return worse evidence than the single fit it wraps."""
+    X, y = _multimodal_1d()
+    # start already in the good basin
+    good = GPRegressor(RBF(s2=1.0, l=0.5), noise_var=0.05)
+    single_best, _ = adam_maximize(lambda p: good.lml_and_grad(X, y, p),
+                                   good.params, lr=0.05, steps=400)
+    single_lml = good.lml_and_grad(X, y, single_best)[0]
+
+    model = GPRegressor(RBF(s2=1.0, l=0.5), noise_var=0.05)
+    model.params = single_best                            # seed with the single fit
+    res = maximize_lml_multistart(model, X, y, n_restarts=6, bounds=_BOX,
+                                  rng=np.random.default_rng(1), steps=400)
+    assert res.lml >= single_lml - 1e-6                   # never worse than the kept init
+
+
+def test_multistart_is_reproducible_and_validates_bounds():
+    X, y = _multimodal_1d()
+    kw = dict(n_restarts=5, bounds=_BOX, steps=200)
+    a = maximize_lml_multistart(GPRegressor(RBF(1.0, 1.0), 0.1), X, y,
+                                rng=np.random.default_rng(3), **kw)
+    b = maximize_lml_multistart(GPRegressor(RBF(1.0, 1.0), 0.1), X, y,
+                                rng=np.random.default_rng(3), **kw)
+    assert np.allclose(a.lmls, b.lmls) and np.allclose(a.params, b.params)
+    # wrong-shaped bounds are rejected (params here are length 3)
+    with pytest.raises(ValueError):
+        maximize_lml_multistart(GPRegressor(RBF(1.0, 1.0), 0.1), X, y,
+                                bounds=np.log([[1e-2, 1e2]]))
