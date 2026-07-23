@@ -382,12 +382,48 @@ extension and is **not** implemented here. 1D input only.
 
 <p align="center"><img src="figures/gibbs_kernel.png" width="1000"></p>
 
+### 9. ML-II is non-convex: multi-start beats multimodal evidence (`experiments/multistart.py`)
+
+Every result above sets the kernel by ML-II — maximizing the log marginal
+likelihood over the hyperparameters. That objective is **not convex**, and in the
+standard case it is genuinely **multimodal** (Rasmussen & Williams 2006, Fig.
+5.5): a sparse, wiggly dataset admits two competing explanations, each a local
+optimum of the evidence —
+
+- **signal**: a short lengthscale with almost no observation noise (the function
+  really wiggles), versus
+- **noise**: a long, flat lengthscale with large noise (the wiggles are
+  measurement error around a near-constant mean).
+
+A single gradient ascent commits to whichever basin its initialization sits in.
+On a 12-point set the two basins are decisively unequal — but a naive
+long-lengthscale start lands in the *worse* one:
+
+| fit | lengthscale $\ell$ | noise $\sigma^2$ | log evidence |
+|---|---|---|---|
+| signal-mode single start | 1.29 | ~0 | **−5.40** |
+| noise-mode single start | 98 | 0.58 | −13.74 |
+| **multi-start** (from the noise init) | 1.29 | ~0 | **−5.40** |
+
+`gp.optimize.maximize_lml_multistart` runs Adam ML-II from several log-space
+initializations — the model's own parameters plus draws sampled uniformly in a
+log-space box (the same strategy as scikit-learn's `n_restarts_optimizer`) — and
+keeps the highest-evidence fit. Started in the noise basin, it still recovers the
+signal optimum (+8.3 nats), and with `keep_init=True` restart 0 is the model's
+own parameters, so it can never return worse evidence than the single fit it
+wraps. The right panel profiles the evidence along the lengthscale (freezing
+$\ell$ on a grid via the fixed-parameter mask and optimizing $\sigma_f^2,
+\sigma^2$ at each point): one sharp peak at the signal lengthscale, a long flat
+plateau where the model has given up and called everything noise.
+
+<p align="center"><img src="figures/multistart.png" width="960"></p>
+
 ## Reproduce
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                          # 75 tests (incl. 8 docstring examples); RuntimeWarnings are errors
+pytest                          # 80 tests (incl. 9 docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~2 s  (kernel prior gallery)
@@ -399,6 +435,7 @@ python heteroscedastic.py       # ~3 s  (two-stage input-dependent noise)
 python ard.py                   # ~5 s  (per-dimension lengthscales, relevance)
 python spatial2d.py             # ~5 s  (2D field: mean + uncertainty surfaces)
 python gibbs_kernel.py          # ~15 s (nonstationary: input-dependent lengthscale)
+python multistart.py            # ~20 s (ML-II multimodality; multi-restart escapes a bad basin)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
