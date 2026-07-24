@@ -513,8 +513,7 @@ weight posterior with HMC instead.
 
 ## Provenance
 
-Built as a study resource: implemented from scratch with AI assistance
-(Claude), with every derivation written out in
+Built as a study resource, with every derivation written out in
 [`theory/derivations.md`](theory/derivations.md) and every non-obvious claim
 tested (finite-difference gradient checks, closed-form ground truths, and
 scikit-learn as an independent oracle). MIT license.
