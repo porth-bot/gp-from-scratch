@@ -420,26 +420,46 @@ plateau where the model has given up and called everything noise.
 
 ## Reproduce
 
+One command, from a clean clone:
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest                          # 80 tests (incl. 9 docstring examples); RuntimeWarnings are errors
+pip install -r requirements.txt && pip install -e .
+./reproduce.sh                  # tests, mypy, then all 10 experiments: ~3 min total
+```
+
+`requirements.txt` pins the exact versions every committed figure and number was
+produced with (Python 3.12.13); `pyproject.toml` keeps lower bounds instead, so
+CI goes on testing against current releases on 3.9 and 3.12.
+
+**How exact is it?** Rerunning the whole suite in that pinned environment
+regenerates 13 of the 14 committed PNGs byte-for-byte: every experiment is
+seeded and NumPy's bit generators are stable across versions, so the datasets,
+the ML-II fits, and the tables are identical. The one file that differs is
+`sklearn_parity.png`, which plots wall-clock and so measures the machine — the
+accuracy half of that comparison (agreement to ~1e-10) is the portable claim.
+
+To run a single experiment instead (timings measured by `reproduce.sh`):
+
+```bash
+pytest                          # 81 tests (incl. 9 docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
-python prior_samples.py         # ~2 s  (kernel prior gallery)
-python validate.py              # ~20 s
-python co2.py                   # ~2 min (ML-II on n~700, 9 free params, twice)
-python ntk_experiments.py       # ~30 s
-python sklearn_parity.py        # ~2 s  (parity + speed vs scikit-learn)
-python heteroscedastic.py       # ~3 s  (two-stage input-dependent noise)
-python ard.py                   # ~5 s  (per-dimension lengthscales, relevance)
-python spatial2d.py             # ~5 s  (2D field: mean + uncertainty surfaces)
-python gibbs_kernel.py          # ~15 s (nonstationary: input-dependent lengthscale)
-python multistart.py            # ~20 s (ML-II multimodality; multi-restart escapes a bad basin)
+python prior_samples.py         # ~1 s  (kernel prior gallery)
+python validate.py              # ~3 s
+python co2.py                   # ~2.5 min (ML-II on n~700, 9 free params, twice)
+python ntk_experiments.py       # ~5 s
+python sklearn_parity.py        # ~1 s  (parity + speed vs scikit-learn)
+python heteroscedastic.py       # ~1 s  (two-stage input-dependent noise)
+python ard.py                   # ~1 s  (per-dimension lengthscales, relevance)
+python spatial2d.py             # ~1 s  (2D field: mean + uncertainty surfaces)
+python gibbs_kernel.py          # ~2 s  (nonstationary: input-dependent lengthscale)
+python multistart.py            # ~3 s  (ML-II multimodality; multi-restart escapes a bad basin)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
-Seeds are fixed.
+Seeds are fixed. The only data file, `data/co2_mm_mlo.txt` (the Mauna Loa
+monthly record), is committed, so there is nothing to download.
 
 ## Design notes
 
