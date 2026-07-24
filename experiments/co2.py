@@ -26,6 +26,8 @@ figure.
 Run:  python experiments/co2.py    (~2 min: ML-II on n~700 with 9 free params)
 """
 
+import os
+
 import numpy as np
 
 from common import plt, savefig
@@ -33,7 +35,11 @@ from gp.gp import GPRegressor
 from gp.kernels import RBF, Matern, Periodic
 from gp.optimize import adam_maximize
 
-DATA = "data/co2_mm_mlo.txt"
+# Resolved against this file, not the working directory: the README documents
+# running the experiments from experiments/, where a CWD-relative "data/..."
+# does not exist.
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    "..", "data", "co2_mm_mlo.txt")
 
 
 def load_co2():

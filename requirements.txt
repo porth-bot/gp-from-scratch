@@ -1,4 +1,19 @@
-numpy>=1.24
-matplotlib>=3.7
-pytest>=7.0
-scikit-learn>=1.3  # used ONLY in tests, as an independent oracle for cross-checks
+# Exact environment the committed figures and README numbers were produced in
+# (Python 3.12.13, CPU). Install with:
+#
+#     python -m venv .venv && ./.venv/bin/pip install -r requirements.txt -e .
+#
+# and reproduce.sh replays deterministically.
+#
+# pyproject.toml deliberately keeps LOWER BOUNDS instead (numpy>=1.24, ...):
+# that is the library's compatibility contract, and CI installs from it so the
+# 3.9/3.12 matrix keeps testing against current releases. This file is the
+# reproduction lockfile; the two jobs are different, so the two files differ.
+# Transitive dependencies (scipy under scikit-learn, matplotlib's own) are
+# left to pip.
+numpy==2.5.0
+matplotlib==3.11.0
+pytest==9.1.1
+mypy==2.2.0
+# used ONLY in tests, as an independent oracle for cross-checks
+scikit-learn==1.9.0

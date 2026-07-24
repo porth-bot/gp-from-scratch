@@ -327,6 +327,28 @@ def test_heteroscedastic_fit_matches_manual_diag_noise_gp():
     np.testing.assert_allclose(m_vec.predict(Xs)[0], m_scal.predict(Xs)[0], atol=1e-12)
 
 
+def test_co2_data_path_is_independent_of_working_directory(tmp_path, monkeypatch):
+    """The CO2 loader must resolve its data file against the repo, not the
+    caller's working directory.
+
+    This is a fresh-clone regression: the path was the literal string
+    "data/co2_mm_mlo.txt", so the invocation the README itself documents
+    (``cd experiments && python co2.py``) died with FileNotFoundError while
+    the same script run from the repo root worked.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from co2 import load_co2
+
+    monkeypatch.chdir(tmp_path)  # any directory that is not the repo root
+    t, ppm = load_co2()
+    assert t.size == ppm.size and t.size > 500
+    assert (ppm > 0).all()          # missing months (flagged negative) filtered
+    assert (np.diff(t) > 0).all()   # monthly series, monotone in time
+
+
 def test_heteroscedastic_noise_wrong_shape_raises():
     rng = np.random.default_rng(0)
     X, y = make_data(rng, n=20)
