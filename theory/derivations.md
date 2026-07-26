@@ -21,6 +21,7 @@ Contents:
 5. The Matern smoothness ladder and the periodic kernel (MacKay's warping)
 6. Arc-cosine kernels (polar integral for kappa1, orthant probability for kappa0)
 7. NNGP, NTK, and linearized gradient descent (the geometric series)
+8. Bochner's theorem and random Fourier features (the `n^3 -> n D^2` trade)
 
 ---
 
@@ -545,6 +546,207 @@ against.
 
 ---
 
+## 8. Bochner's theorem and random Fourier features
+
+Sections 1–3 build the exact GP, and every one of its costs is a cost of the
+`n x n` Gram matrix: `n^2` to store, `n^3/3` to factorize. Random Fourier
+features (Rahimi & Recht 2007, implemented in `gp/rff.py`) buy a way out by
+writing the kernel as an *explicit* inner product in a finite feature space,
+after which the model is ordinary Bayesian linear regression. The reason a
+Fourier basis is the right one to randomize over is Bochner's theorem.
+
+### 8.1 Bochner's theorem and the RBF spectral density
+
+**Theorem (Bochner 1932).** A continuous function `k(delta)` on `R^d` is the
+covariance of a (weakly) stationary process — equivalently, positive definite
+— if and only if it is the Fourier transform of a finite non-negative measure.
+
+Since `k(0) = s2` is finite, that measure can be normalized to a probability
+density `p(w)`, the kernel's **spectral density**, giving
+
+```
+k(x - x') = s2 * INT p(w) exp(i w . (x - x')) dw = s2 * E_{w ~ p} [ exp(i w . (x - x')) ].
+```
+
+The content is the "if and only if": positive definiteness *is* the statement
+that a stationary kernel is a superposition of plane waves with non-negative
+weights. That superposition is an expectation, and expectations can be
+estimated by Monte Carlo — which is the whole idea.
+
+For the RBF the spectral density is available in closed form because the
+Gaussian is its own Fourier transform. Take `p(w) = N(0, l^{-2} I_d)`. Its
+characteristic function is the standard Gaussian one,
+
+```
+E_{w ~ N(0, Sigma)} [ exp(i w . delta) ] = exp( -1/2 delta^T Sigma delta ),
+```
+
+so with `Sigma = l^{-2} I`,
+
+```
+s2 * E [ exp(i w . delta) ] = s2 * exp( -||delta||^2 / (2 l^2) ) = k_RBF(delta).   (8.1)
+```
+
+No constants to chase: **the RBF's spectral density is exactly `N(0, l^{-2}I)`**.
+Read it as the frequency-domain meaning of the lengthscale — a *short* `l`
+means a *wide* spread of frequencies, i.e. a wiggly prior. The ARD kernel
+(Sec. 4) is the same statement per coordinate, `p(w) = N(0, diag(l_d^{-2}))`,
+which is why `RFFMap` accepts a vector lengthscale unchanged.
+
+Because `k` is real and `p` is symmetric (`p(w) = p(-w)`), the imaginary part
+integrates to zero and
+
+```
+k(x - x') = s2 * E_w [ cos( w . (x - x') ) ].                                    (8.2)
+```
+
+### 8.2 From an expectation to a feature map
+
+Equation (8.2) is an average of `cos(w . x - w . x')`, and the angle-subtraction
+identity splits that into a product of terms in `x` and `x'` separately:
+
+```
+cos(a - b) = cos a cos b + sin a sin b.
+```
+
+So drawing `w_1, ..., w_m ~ p` i.i.d. and defining
+
+```
+z(x) = sqrt(s2 / m) [ cos(w_1.x), ..., cos(w_m.x), sin(w_1.x), ..., sin(w_m.x) ]  in R^D,  D = 2m
+```
+
+gives, exactly,
+
+```
+z(x) . z(x') = (s2 / m) SUM_j [ cos(w_j.x) cos(w_j.x') + sin(w_j.x) sin(w_j.x') ]
+             = (s2 / m) SUM_j cos( w_j . (x - x') ),                              (8.3)
+```
+
+an average of `m` i.i.d. copies of the random variable inside (8.2). Hence
+
+```
+E[ z(x) . z(x') ] = k(x, x')      — the estimator is unbiased at every pair.
+```
+
+**Rahimi & Recht's original map** uses one feature per frequency with a random
+phase, `z_RR(x) = sqrt(2 s2 / D) cos(w.x + b)`, `b ~ U(0, 2 pi)`. It is also
+unbiased, via `2 cos(A + b) cos(B + b) = cos(A - B) + cos(A + B + 2b)` and
+`E_b[cos(A + B + 2b)] = 0`. But that second term is pure noise, and it shows up
+in the variance. Write `kt(delta) = k(delta)/s2` and `A = w.(x - x')`. For a
+single term of each estimator, using `E[cos^2 A] = (1 + kt(2 delta))/2`:
+
+```
+Var_paired / s2^2 = (1 + kt(2 delta))/2 - kt(delta)^2        (m = D/2 terms)
+Var_offset / s2^2 = (1 + kt(2 delta))/2 + 1/2 - kt(delta)^2  (D terms)
+```
+
+so, dividing by the number of terms, paired beats offset exactly when
+
+```
+(1 + kt(2 delta))/2 - kt(delta)^2 < 1/2      <=>      kt(2 delta) / 2 < kt(delta)^2.
+```
+
+For the RBF, `kt(2 delta) = exp(-2u)` and `kt(delta)^2 = exp(-u)` with
+`u = ||delta||^2 / l^2`, and `exp(-2u)/2 < exp(-u)` for every `u >= 0`. The
+paired map is therefore strictly better *everywhere* for this kernel
+(Sutherland & Schneider 2015), which `tests/test_rff.py` also measures.
+
+The special case `delta = 0` is worth stating on its own. The paired variance
+vanishes identically there (`kt(0) = 1` gives `(1+1)/2 - 1 = 0`), and indeed
+
+```
+z(x) . z(x) = (s2 / m) SUM_j [ cos^2(w_j.x) + sin^2(w_j.x) ] = s2   for every x,
+```
+
+by the Pythagorean identity, *per frequency* — not in expectation. The prior
+variance is reproduced exactly, so the error bars are not polluted by noise in
+`k(x, x)`. The offset map has `Var/s2^2 = 1/(2D)` there, and its `k(x, x)`
+fluctuates around `s2`.
+
+### 8.3 The rate, and what it costs
+
+(8.3) is a plain Monte Carlo average, so its standard deviation falls as
+`m^{-1/2} ~ D^{-1/2}` at every pair of inputs, with **no dependence on the
+input dimension** `d` (the dimension enters only through how hard the target
+function is). Rahimi & Recht additionally prove a *uniform* bound: the sup
+over a compact set of diameter `R` is `O_p( sqrt(d log(R/eps)) / sqrt(D) )`,
+i.e. the same rate up to a log factor.
+
+The exchange rate is unforgiving and worth internalizing: **4x the features
+buys 2x the accuracy**. `experiments/rff.py` measures 13.5x accuracy for 256x
+features (the rate predicts 16x). RFF is a tool for making `n` large, not for
+making error small.
+
+### 8.4 Weight space and function space are the same posterior
+
+Once the frequencies are drawn they are *fixed*, and the model
+
+```
+f(x) = z(x) . w,   w ~ N(0, I_D),   y = f(x) + eps,   eps ~ N(0, sigma^2)
+```
+
+is a Gaussian process with the **finite-rank kernel** `k_D(x, x') = z(x).z(x')`
+— exactly, not approximately: `Cov[f(x), f(x')] = z(x)^T E[w w^T] z(x') =
+z(x).z(x')`. The approximation lives entirely in `k_D ~ k`; everything after
+it is exact inference. Standard Bayesian linear regression (R&W Sec. 2.1) with
+`A = Z^T Z + sigma^2 I_D` gives
+
+```
+w | y ~ N( A^{-1} Z^T y,  sigma^2 A^{-1} ),
+mean(x*) = z(x*) . A^{-1} Z^T y,     var(x*) = sigma^2 z(x*)^T A^{-1} z(x*).      (8.4)
+```
+
+The equivalence of (8.4) with the function-space formulas of Sec. 1 applied to
+`k_D` is the matrix inversion lemma; `tests/test_rff.py` checks it numerically
+to `1e-8` by running `RFFRegressor` and `GPRegressor(RFFMap(...))` on the same
+data. That test is what licenses the claim that the *only* error is
+Monte Carlo.
+
+The costs are the point of the whole exercise:
+
+| | exact GP | RFF |
+|---|---|---|
+| build | `n^2` kernel entries | `n D` features (`n D d` flops) |
+| solve | `n^3 / 3` Cholesky of `K_y` | `n D^2` Gram + `D^3 / 3` Cholesky of `A` |
+| memory | `n^2` | `n D` |
+| predict (per point) | `n^2` | `D^2` |
+
+Linear in `n` instead of cubic — so the two curves have different slopes on a
+log-log plot and cross (measured at just past `n = 500` for `D = 512`, with
+252x at `n = 8000`).
+
+### 8.5 Where it breaks: variance starvation
+
+A rank-`D` prior has `D` degrees of freedom in total. As `n` grows past `D`
+the data determines essentially all of them, `A = Z^T Z + sigma^2 I` becomes
+dominated by `Z^T Z`, and the posterior variance (8.4) shrinks *everywhere* —
+including at inputs far from any data, where the exact GP correctly returns
+something near the prior `s2`. The model becomes confidently wrong precisely
+in the region where uncertainty was the reason to use a GP at all (Wang et al.
+2018).
+
+There is no fix within RFF other than raising `D`: the honest reading is that
+RFF approximates the posterior *mean* cheaply, and its error bars are
+trustworthy only while `D` is large relative to the number of independent
+directions the data pins down. `experiments/rff.py` measures the effect at
+`n = 3000` with a gap in the inputs: the exact posterior sd at the gap centre
+is 0.97, `D = 2048` gives 0.94, and `D = 64` gives 0.088.
+
+### 8.6 Note on hyperparameters
+
+`RFFMap` exposes no gradients, so ML-II (Sec. 2) cannot be run through it as
+written: the frequencies `w_j` are drawn *from* a density that depends on `l`,
+so changing `l` changes the model. The practical recipe used here is to fit
+the exact GP's hyperparameters first (on a subset if `n` is large) and then
+build the map at those values. It is not a fundamental obstacle — the
+reparameterization `w_j = eps_j / l` with `eps_j ~ N(0, I)` fixed makes `z(x)`
+a differentiable function of `l`, and the evidence of the finite-rank model is
+then differentiable in the usual way — but that path is not implemented, and
+optimizing the evidence of `k_D` is not the same as optimizing the evidence of
+`k`.
+
+---
+
 ## References
 
 - C. E. Rasmussen and C. K. I. Williams, *Gaussian Processes for Machine
@@ -566,3 +768,14 @@ against.
   Under Gradient Descent," *NeurIPS* 2019. (Linearized-GD dynamics.)
 - D. P. Kingma and J. Ba, "Adam: A Method for Stochastic Optimization,"
   *ICLR* 2015. (The optimizer used for ML-II ascent.)
+- S. Bochner, *Vorlesungen über Fouriersche Integrale*, 1932. (The
+  characterization of positive-definite stationary kernels, Sec. 8.1.)
+- A. Rahimi and B. Recht, "Random Features for Large-Scale Kernel Machines,"
+  *NeurIPS* 2007. (Random Fourier features, the offset map, and the uniform
+  error bound.)
+- D. J. Sutherland and J. Schneider, "On the Error of Random Fourier
+  Features," *UAI* 2015. (Variance of the two maps; the paired map's
+  advantage, Sec. 8.2.)
+- Z. Wang, C. Gehring, P. Kohli, and S. Jegelka, "Batched Large-Scale Bayesian
+  Optimization in High-Dimensional Spaces," *AISTATS* 2018. (Variance
+  starvation, Sec. 8.5.)
