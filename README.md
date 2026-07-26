@@ -57,7 +57,8 @@ derived in Sec. 2 and checked against central differences in the tests.
 |---|---|
 | [`gp/gp.py`](gp/gp.py) | Exact GP regression via Cholesky; posterior mean/variance; log marginal likelihood **and** its analytic gradient (trace identity); **closed-form leave-one-out CV** (predictive mean/variance and log-CV score from the *same* factorization — O(n³) once, not n refits; R&W 5.4.2); never forms $K^{-1}$ for prediction |
 | [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞), **ARD** (per-dimension lengthscales; → isotropic RBF when equal), **Gibbs** (nonstationary — input-dependent lengthscale $\ell(x)=e^{a+bx}$, PSD for any positive $\ell(\cdot)$; → RBF exactly when $b=0$) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
-| [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging |
+| [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging, plus **multi-start ML-II** (the evidence is multimodal — §9) |
+| [`gp/rff.py`](gp/rff.py) | **Random Fourier features** (Rahimi & Recht 2007): the RBF's spectral density from Bochner's theorem, a cos/sin feature map that reproduces $k(x,x)$ *exactly*, and Bayesian linear regression in that feature space — the $O(n^3) \to O(nD^2)$ approximate GP (§10) |
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
 
@@ -418,6 +419,78 @@ plateau where the model has given up and called everything noise.
 
 <p align="center"><img src="figures/multistart.png" width="960"></p>
 
+### 10. Random Fourier features: buying $O(nD^2)$ with Monte Carlo (`experiments/rff.py`)
+
+Everything above is the *exact* GP, and every one of its costs is a cost of the
+$n \times n$ Gram matrix. **Bochner's theorem** says a continuous stationary
+kernel is positive definite exactly when it is the Fourier transform of a
+finite non-negative measure — so, normalized, $k(x-x') = \sigma_f^2\,
+\mathbb E_{w\sim p}[\cos(w\cdot(x-x'))]$ for the kernel's *spectral density*
+$p(w)$, and for the RBF that density is exactly $\mathcal N(0, \ell^{-2}I)$
+(short lengthscale $\Rightarrow$ wide band of frequencies). A kernel written
+as an expectation can be estimated by Monte Carlo: draw $m = D/2$ frequencies,
+pair a cosine with a sine at each,
+
+$$z(x) = \sqrt{\sigma_f^2/m}\,\big[\cos(w_j\!\cdot\! x),\ \sin(w_j\!\cdot\! x)\big]_{j=1}^{m}, \qquad z(x)\cdot z(x') = \frac{\sigma_f^2}{m}\sum_j \cos\big(w_j\!\cdot\!(x-x')\big),$$
+
+and the kernel becomes an explicit inner product in $\mathbb R^D$. The cos/sin
+pairing rather than Rahimi & Recht's $\cos(w\cdot x + b)$ is a real choice:
+both are unbiased, but paired has strictly lower variance for the RBF (proved
+in [`theory/derivations.md`](theory/derivations.md) §8.2, and measured), and
+$z(x)\cdot z(x) = \sigma_f^2$ holds **exactly** — per frequency, by
+$\cos^2+\sin^2=1$ — so the prior variance carries no Monte Carlo noise at all.
+
+With the map fixed, the model is *not* an approximate GP: it is the exact GP of
+the finite-rank kernel $k_D(x,x') = z(x)\cdot z(x')$, done in weight space at
+$O(nD^2 + D^3)$ instead of function space at $O(n^3)$. `RFFRegressor` and
+`GPRegressor(RFFMap(...))` are checked to agree to $10^{-8}$, which pins the
+*only* error source to $k_D \approx k$.
+
+**The rate.** Monte Carlo, so $D^{-1/2}$, with no dependence on input
+dimension. Four times the features buys twice the accuracy:
+
+| $D$ | max $\lvert k_D - k\rvert$ (median of 9 draws) | max $\lvert \mu_D - \mu_{\text{exact}}\rvert$ | max $\lvert s_D - s_{\text{exact}}\rvert$ |
+|---|---|---|---|
+| 16 | 0.472 | 0.034 &nbsp;*(worst draw 0.93)* | 0.018 |
+| 64 | 0.239 | 0.022 | 0.010 |
+| 256 | 0.125 | 0.021 | 0.006 |
+| 1024 | 0.076 | 0.0095 | 0.0026 |
+| 4096 | 0.035 | 0.0060 | 0.0016 |
+
+(posterior columns at $n=800$, same hyperparameters both sides, against a
+posterior mean spanning $\pm 1.52$.) 256× the features bought **13.5×** the
+kernel accuracy where the rate predicts 16×. That exchange rate is the honest
+summary of the method: RFF is a tool for making $n$ large, not for making error
+small — and at $D=16$ the *spread over draws* reaches 0.93, i.e. a bad draw of
+eight frequencies is simply a bad model.
+
+**The payoff.** Cubic versus linear in $n$, so the curves cross and then
+separate (fit + predict, same machine, $D = 512$):
+
+| $n$ | exact GP | RFF, $D=512$ | speedup | max mean error |
+|---|---|---|---|---|
+| 500 | 0.006 s | 0.008 s | 0.8× | 2.2e−2 |
+| 1000 | 0.026 s | 0.010 s | 2.7× | 8.8e−3 |
+| 2000 | 0.160 s | 0.013 s | 12× | 9.0e−3 |
+| 4000 | 1.19 s | 0.020 s | 59× | 9.2e−3 |
+| 8000 | 8.36 s | 0.033 s | **252×** | 4.4e−3 |
+
+**What breaks — variance starvation.** A rank-$D$ model has $D$ degrees of
+freedom in total. Once $n \gg D$ the data pins essentially all of them and the
+posterior variance collapses *everywhere*, including where an exact GP
+correctly widens. With $n = 3000$ and a gap in $\lvert x\rvert < 1.2$, the
+exact posterior sd at the gap centre is **0.97**; $D = 2048$ gives 0.94;
+$D = 64$ gives **0.088** — a tenth of the honest uncertainty, in the one place
+uncertainty was the reason to use a GP (Wang et al. 2018). The mean is still
+fine there; the error bar is not. Raising $D$ is the only fix within RFF.
+
+<p align="center"><img src="figures/rff.png" width="960"></p>
+
+One consequence worth stating plainly: `RFFMap` exposes no gradients, so ML-II
+cannot be run through it as written — the frequencies are drawn *from* a
+density that depends on $\ell$. Fit the exact GP's hyperparameters first (on a
+subset if $n$ is large), then build the map at those values.
+
 ## Reproduce
 
 One command, from a clean clone:
@@ -425,7 +498,7 @@ One command, from a clean clone:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
-./reproduce.sh                  # tests, mypy, then all 10 experiments: ~3 min total
+./reproduce.sh                  # tests, mypy, then all 11 experiments: ~4 min total
 ```
 
 `requirements.txt` pins the exact versions every committed figure and number was
@@ -433,16 +506,17 @@ produced with (Python 3.12.13); `pyproject.toml` keeps lower bounds instead, so
 CI goes on testing against current releases on 3.9 and 3.12.
 
 **How exact is it?** Rerunning the whole suite in that pinned environment
-regenerates 13 of the 14 committed PNGs byte-for-byte: every experiment is
+regenerates 13 of the 15 committed PNGs byte-for-byte: every experiment is
 seeded and NumPy's bit generators are stable across versions, so the datasets,
-the ML-II fits, and the tables are identical. The one file that differs is
-`sklearn_parity.png`, which plots wall-clock and so measures the machine — the
-accuracy half of that comparison (agreement to ~1e-10) is the portable claim.
+the ML-II fits, and the tables are identical. The two files that differ are
+`sklearn_parity.png` and `rff.png`, both of which plot wall-clock and so
+measure the machine — their accuracy claims (agreement to ~1e-10; the
+$D^{-1/2}$ error curve) are the portable ones.
 
 To run a single experiment instead (timings measured by `reproduce.sh`):
 
 ```bash
-pytest                          # 81 tests (incl. 9 docstring examples); RuntimeWarnings are errors
+pytest                          # 92 tests (incl. 11 docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -455,6 +529,7 @@ python ard.py                   # ~1 s  (per-dimension lengthscales, relevance)
 python spatial2d.py             # ~1 s  (2D field: mean + uncertainty surfaces)
 python gibbs_kernel.py          # ~2 s  (nonstationary: input-dependent lengthscale)
 python multistart.py            # ~3 s  (ML-II multimodality; multi-restart escapes a bad basin)
+python rff.py                   # ~50 s (random Fourier features: rate, speed, and variance starvation)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
@@ -487,9 +562,16 @@ monthly record), is committed, so there is nothing to download.
 
 ## Limitations / next
 
-- **Exact GP only:** the $O(n^3)$ Cholesky caps this at a few thousand points.
-  Random Fourier features (Bochner's theorem) are on the roadmap for the
-  $n^3 \to nD^2$ tradeoff.
+- **Exact inference is still $O(n^3)$.** Random Fourier features (§10) lift the
+  ceiling — 252× at $n=8000$ — but they buy accuracy at the Monte Carlo rate and
+  starve the predictive variance once $n \gg D$, so they are a *mean*
+  accelerator, not a drop-in replacement. The principled alternative for
+  calibrated uncertainty at scale is inducing points (Titsias 2009, SVGP), which
+  is not implemented here.
+- **RFF hyperparameters are not learned.** The feature map has no gradients, so
+  ML-II has to be run on an exact GP (or a subset) first and the map built at
+  those values; §8.6 of the theory doc sketches the reparameterization that
+  would make the map differentiable in $\ell$.
 - **RBF trend mean-reverts**, which is why ML-II extrapolates the CO₂ series
   poorly (above). The RationalQuadratic kernel — the standard fix — is now
   implemented; wiring it into the CO₂ composite and re-measuring the hold-out
@@ -506,7 +588,9 @@ Jacot, Gabriel & Hongler (2018) (the NTK); Lee et al. (2018) / Matthews et al.
 (2015) (Adam); MacKay (1998) (the periodic kernel via warping); Goldberg,
 Williams & Bishop (1998) (the two-stage heteroscedastic GP); Gibbs (1997) and
 Paciorek & Schervish (2004) (the nonstationary input-dependent-lengthscale
-kernel). Full list with roles in [`theory/derivations.md`](theory/derivations.md).
+kernel); Bochner (1932), Rahimi & Recht (2007), Sutherland & Schneider (2015)
+and Wang et al. (2018) (random Fourier features and variance starvation).
+Full list with roles in [`theory/derivations.md`](theory/derivations.md).
 
 ## Part of a from-scratch series
 
