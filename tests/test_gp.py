@@ -456,3 +456,82 @@ def test_multistart_is_reproducible_and_validates_bounds():
     with pytest.raises(ValueError):
         maximize_lml_multistart(GPRegressor(RBF(1.0, 1.0), 0.1), X, y,
                                 bounds=np.log([[1e-2, 1e2]]))
+
+
+# -- checks the theory doc's exercises cite (Sec. 9) --------------------------
+
+def test_evidence_at_a_huge_lengthscale_matches_the_rank_one_closed_form():
+    """Sec. 9, Exercise 2(a).
+
+    As l -> infinity the RBF kernel matrix flattens to s2 * 11^T, so
+    K_y -> s2 J + noise I: a rank-one update of a multiple of the identity,
+    whose inverse and determinant are elementary (Sherman-Morrison /
+    matrix determinant lemma). The evidence then has a closed form with no
+    linear algebra in it at all, which is what makes the "explain it all as
+    noise" basin analysable by hand.
+    """
+    X, y = _multimodal_1d()
+    n = len(y)
+    for s2, noise in ((1.0, 0.5), (2.0, 0.3), (0.05, 1.2)):
+        quad = (y @ y - s2 * y.sum() ** 2 / (noise + n * s2)) / noise
+        logdet = (n - 1) * np.log(noise) + np.log(noise + n * s2)
+        closed = -0.5 * quad - 0.5 * logdet - 0.5 * n * np.log(2.0 * np.pi)
+
+        m = GPRegressor(RBF(s2=s2, l=1e6), noise_var=noise)
+        m.fit(X, y)
+        assert m.log_marginal_likelihood() == pytest.approx(closed, abs=1e-8)
+
+
+def test_the_all_noise_basin_is_the_infinite_lengthscale_plateau():
+    """Sec. 9, Exercise 2(b-c).
+
+    Maximizing the closed form of the previous test over (s2, noise) at
+    l = infinity: with ybar ~ 0 the rank-one term buys nothing, s2 -> 0, and
+    the noise takes the sample second moment, giving
+
+        LML* = -(n/2) [ 1 + log(2 pi y.y/n) ].
+
+    That number, -13.73 here, is where the README's "noise-mode single start"
+    row (-13.74, at l = 98 on a domain of width 8) actually sits. The second
+    optimum ML-II can fall into is not an interesting lengthscale -- it is the
+    flat plateau at the end of the lengthscale axis, which is why multi-start
+    (rather than a better local optimizer) is the fix.
+    """
+    X, y = _multimodal_1d()
+    n = len(y)
+    plateau = -0.5 * n * (1.0 + np.log(2.0 * np.pi * (y @ y) / n))
+    assert plateau == pytest.approx(-13.73, abs=0.01)
+
+    # the limit is approached from below by an actual fit at s2 -> 0, l -> inf
+    m = GPRegressor(RBF(s2=1e-8, l=1e6), noise_var=float(y @ y) / n)
+    m.fit(X, y)
+    assert m.log_marginal_likelihood() == pytest.approx(plateau, abs=1e-6)
+
+    # and it is the basin the long-lengthscale start converges to
+    lml_noise, _ = _single_fit(30.0, 0.6, X, y)
+    assert abs(lml_noise - plateau) < 0.05
+
+
+def test_log_chi_squared_bias_constant_is_the_number_it_claims_to_be():
+    """Sec. 9, Exercise 5.
+
+    experiments/heteroscedastic.py fits a GP to log r_i^2 and then adds back
+    1.2704, because E[log r^2] = log s^2 + E[log chi^2_1] and
+    E[log chi^2_1] = psi(1/2) + log 2 = -gamma - log 2 = -1.2704. Forgetting
+    the correction would scale every fitted noise variance by e^-1.2704 = 0.28
+    -- a silent 3.6x under-estimate of the noise that no shape check would
+    catch. This pins the constant to the closed form and to a direct Monte
+    Carlo estimate of the expectation.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from heteroscedastic import LOG_CHI2_BIAS
+
+    closed_form = np.euler_gamma + np.log(2.0)   # -(psi(1/2) + log 2)
+    assert LOG_CHI2_BIAS == pytest.approx(closed_form, abs=5e-5)
+
+    z = np.random.default_rng(0).standard_normal(4_000_000)
+    # sd of log chi^2_1 is sqrt(pi^2/2) = 2.22, so the s.e. here is ~0.0011
+    assert np.mean(np.log(z**2)) == pytest.approx(-closed_form, abs=0.005)
