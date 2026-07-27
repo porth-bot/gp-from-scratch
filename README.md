@@ -516,7 +516,7 @@ $D^{-1/2}$ error curve) are the portable ones.
 To run a single experiment instead (timings measured by `reproduce.sh`):
 
 ```bash
-pytest                          # 92 tests (incl. 11 docstring examples); RuntimeWarnings are errors
+pytest                          # 95 tests (incl. 11 docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -549,6 +549,14 @@ monthly record), is committed, so there is nothing to download.
   against an actual brute-force refit, and the NTK example lands on the exact
   rationals the arc-cosine kernels give at $\theta = 0$. Documentation that
   drifts from the code fails CI.
+- **The theory doc has exercises.** [`theory/derivations.md`](theory/derivations.md)
+  §9 poses five problems with collapsed solutions — deriving the leave-one-out
+  identity, identifying the "it's all noise" evidence optimum as the
+  infinite-lengthscale plateau in closed form, proving that warping preserves
+  positive-definiteness (and where that argument stops short of the Gibbs
+  kernel), proving that random features starve the posterior variance, and
+  deriving the $-1.2704$ log-$\chi^2$ correction in the heteroscedastic fit.
+  Each ends by naming the test that checks it.
 - **The inverse is never formed for prediction.** One Cholesky gives the mean
   (two triangular solves), the pointwise variance (a solve against $K_*$), and
   the log-determinant (a diagonal sum) at once. $K^{-1}$ is materialized only

@@ -747,6 +747,350 @@ optimizing the evidence of `k_D` is not the same as optimizing the evidence of
 
 ---
 
+## 9. Exercises
+
+Five problems whose answers are already somewhere in this repo — as a line of
+code, a measured number, or a test. Solutions are collapsed; each one ends with
+the check that keeps it honest.
+
+### Exercise 1 — Leave-one-out without refitting
+
+`GPRegressor.loo` returns, for every training point, the predictive
+distribution of the GP refit on the *other* $n-1$ points, at the cost of one
+factorization it had already done. Write $\tilde K = K + \operatorname{diag}(\sigma^2)$
+for the noisy covariance and $\alpha = \tilde K^{-1} y$.
+
+**(a)** Order the points so that $i$ comes first and partition $\tilde K$ into
+blocks. Using the block-inverse formula, show that
+
+$$[\tilde K^{-1}]_{ii} = \big(\tilde K_{ii} - \tilde K_{i,-i}\tilde K_{-i,-i}^{-1}\tilde K_{-i,i}\big)^{-1},$$
+
+and identify the bracket as something you have already derived elsewhere in
+this document.
+
+**(b)** Deduce $\sigma_i^2 = 1/[\tilde K^{-1}]_{ii}$ and
+$\mu_i = y_i - \alpha_i/[\tilde K^{-1}]_{ii}$ (R&W eqs. 5.10–5.12).
+
+**(c)** Is $\sigma_i^2$ a *latent* or an *observation* predictive variance?
+And why is $\sum_i \log p(y_i \mid X, y_{-i})$ a defensible model-selection
+score when the log marginal likelihood is already available?
+
+<details>
+<summary>Solution</summary>
+
+**(a)** With the ordering $(i, -i)$ the block-inverse formula gives the $(1,1)$
+entry of $\tilde K^{-1}$ as the inverse of the **Schur complement** of
+$\tilde K_{-i,-i}$ in $\tilde K$:
+
+$$[\tilde K^{-1}]_{ii} = \big(\tilde K_{ii} - \tilde K_{i,-i}\tilde K_{-i,-i}^{-1}\tilde K_{-i,i}\big)^{-1}.$$
+
+The bracket is exactly the conditional variance of Sec. 1: it *is*
+$\operatorname{Var}[y_i \mid y_{-i}]$, the posterior variance at $x_i$ of a GP
+conditioned on the other points, noise included. So the LOO variance is not
+merely computable from $\tilde K^{-1}$ — it is a diagonal entry of
+$\tilde K^{-1}$, upside down. Nothing about leaving a point out is new work;
+Gaussian conditioning already did it.
+
+**(b)** Inverting (a) gives $\sigma_i^2 = 1/[\tilde K^{-1}]_{ii}$ directly. For
+the mean, read off row $i$ of $\tilde K^{-1}$, which the same block formula
+gives as
+
+$$[\tilde K^{-1}]_{i,\cdot} = [\tilde K^{-1}]_{ii}\,\big[\,1,\; -\tilde K_{i,-i}\tilde K_{-i,-i}^{-1}\,\big]$$
+
+in the $(i,-i)$ ordering. Hitting $y$ with it,
+
+$$\alpha_i = [\tilde K^{-1}]_{ii}\big(y_i - \tilde K_{i,-i}\tilde K_{-i,-i}^{-1} y_{-i}\big) = [\tilde K^{-1}]_{ii}\,(y_i - \mu_i),$$
+
+since the second bracket is precisely the GP posterior mean at $x_i$ from the
+other $n-1$ points. Rearranged, $\mu_i = y_i - \alpha_i/[\tilde K^{-1}]_{ii}$,
+and $\alpha_i/[\tilde K^{-1}]_{ii} = \alpha_i \sigma_i^2$ is the LOO residual.
+Cost: one $O(n^3)$ Cholesky (already paid by `fit`) plus $O(n^3)$ for
+$\tilde K^{-1}$, versus $n$ refits at $O(n^4)$.
+
+**(c)** *Observation*-level. $\tilde K$ carries the noise on its diagonal, so
+the bracket in (a) is the variance of $y_i$, not of $f(x_i)$; it matches
+`predict(..., include_noise=True)` at the held-out point. Hence the residual
+$y_i - \mu_i$ is being compared against a band that is supposed to contain a
+noisy observation, which is the honest comparison for CV.
+
+As a score, the LOO log predictive density never conditions a point on itself,
+whereas the marginal likelihood is a statement about the model's fit to the
+whole dataset *including* $y_i$. The two disagree in a useful way: the evidence
+can be maximized by a model that is confident and wrong out of sample (the CO2
+extrapolation in §5 of the README is exactly that failure), while
+$\sum_i \log p(y_i \mid y_{-i})$ penalizes over-confidence point by point.
+R&W Sec. 5.4.2 makes the same argument, adding that LOO-CV is more robust when
+the model is misspecified — which, for a hand-chosen kernel, it always is.
+
+*Check it:* `tests/test_gp.py::test_closed_form_loo_matches_brute_force_refits`
+compares both returned quantities against $n$ actual refits on the other
+$n-1$ points, and `::test_closed_form_loo_matches_brute_force_heteroscedastic`
+does it again with per-point noise — both to $10^{-8}$.
+
+</details>
+
+### Exercise 2 — The other optimum ML-II can fall into
+
+`experiments/multistart.py` shows the evidence of an RBF + noise model on 12
+sparse points having two optima: a short-lengthscale "it's signal" one at
+$-5.40$ nats and a long-lengthscale "it's all noise" one at $-13.74$. This
+exercise identifies the second one exactly.
+
+**(a)** Let $\ell \to \infty$ with $s^2$ and $\sigma^2$ fixed. Show
+$\tilde K \to s^2 \mathbf{1}\mathbf{1}^\top + \sigma^2 I$, and use
+Sherman–Morrison and the matrix determinant lemma to write the log marginal
+likelihood in closed form — no linear algebra left.
+
+**(b)** Maximize that expression over $s^2$ and $\sigma^2$ for data with
+$\bar y \approx 0$. What does $s^2$ do, and what does $\sigma^2$ become?
+
+**(c)** Evaluate it for the dataset in `_multimodal_1d` ($n = 12$,
+$y^\top y/n = 0.577$) and compare with the $-13.74$ the README reports. What
+does the comparison say about *why* multi-start, rather than a better local
+optimizer, is the right fix?
+
+<details>
+<summary>Solution</summary>
+
+**(a)** $k_{\mathrm{RBF}}(x,x') = s^2 \exp(-\lVert x-x'\rVert^2/2\ell^2) \to s^2$
+for every pair as $\ell \to \infty$, so $\tilde K \to s^2 J + \sigma^2 I$ with
+$J = \mathbf{1}\mathbf{1}^\top$. Sherman–Morrison and the determinant lemma
+give
+
+$$\tilde K^{-1} = \frac{1}{\sigma^2}\Big(I - \frac{s^2\,\mathbf{1}\mathbf{1}^\top}{\sigma^2 + n s^2}\Big), \qquad |\tilde K| = (\sigma^2)^{n-1}(\sigma^2 + n s^2),$$
+
+hence
+
+$$\log p(y) = -\frac{1}{2\sigma^2}\Big(y^\top y - \frac{s^2 (\textstyle\sum_i y_i)^2}{\sigma^2 + n s^2}\Big) - \frac{n-1}{2}\log \sigma^2 - \frac{1}{2}\log(\sigma^2 + n s^2) - \frac{n}{2}\log 2\pi.$$
+
+Only two scalars of the data survive: $y^\top y$ and $\sum_i y_i$. An infinitely
+long lengthscale is a model with one degree of freedom — a constant — plus
+noise.
+
+**(b)** The only place $s^2$ helps is the term $s^2(\sum y_i)^2/(\sigma^2+ns^2)$,
+which shrinks the quadratic form by explaining the sample *mean*; and the only
+place it hurts is $\tfrac12\log(\sigma^2 + n s^2)$. With $\bar y \approx 0$ the
+first is worth nothing, so the penalty wins and $s^2 \to 0$: the constant
+component is switched off entirely. What is left is the i.i.d. Gaussian model
+$y \sim N(0, \sigma^2 I)$, maximized at $\hat\sigma^2 = y^\top y/n$, giving
+
+$$\mathrm{LML}^* = -\frac{n}{2}\Big[1 + \log\big(2\pi\, y^\top y/n\big)\Big].$$
+
+**(c)** With $n = 12$ and $y^\top y/n = 0.577$ this is $-13.73$. The README's
+"noise-mode single start" row is $-13.74$, at a fitted $\ell = 98$ on a domain
+of width 8 — i.e. numerically infinite. So the second optimum is not a rival
+*explanation* with an interesting lengthscale; it is the flat plateau at the
+end of the lengthscale axis, where the model has given up and called the data
+noise. That is why the fix is multi-start and not a better local optimizer: the
+plateau is genuinely, correctly flat, gradient information there points nowhere
+useful, and the only way out is to start somewhere else. It is also why the
+evidence gap ($8.3$ nats) is large — these are not two nearby fits.
+
+*Check it:* `tests/test_gp.py::test_evidence_at_a_huge_lengthscale_matches_the_rank_one_closed_form`
+pins (a) against `GPRegressor` at $\ell = 10^6$ to $10^{-8}$, and
+`::test_the_all_noise_basin_is_the_infinite_lengthscale_plateau` pins (b) and
+(c), including that the long-lengthscale fit lands within $0.05$ nats of the
+plateau value.
+
+</details>
+
+### Exercise 3 — Warping preserves positive definiteness (and where that argument runs out)
+
+**(a)** Let $k$ be a positive semi-definite kernel on $\mathcal{U}$ and let
+$u : \mathcal{X} \to \mathcal{U}$ be *any* map. Show that
+$k'(x,x') = k(u(x), u(x'))$ is positive semi-definite on $\mathcal{X}$.
+
+**(b)** Use it to conclude that the periodic kernel of Sec. 5.2,
+$k_{\mathrm{per}}(x,x') = s^2\exp(-2\sin^2(\pi|x-x'|/p)/\ell^2)$, is a valid
+kernel, and note what (a) buys you that a direct Bochner argument would have
+to work for.
+
+**(c)** The Gibbs kernel of `gp/kernels.py` gives every input its own
+lengthscale $\ell(x)$. Explain why (a) does **not** establish that it is PSD,
+and say what does — in particular, what job the prefactor
+$\sqrt{2\ell(x)\ell(x')/(\ell(x)^2+\ell(x')^2)}$ is doing.
+
+<details>
+<summary>Solution</summary>
+
+**(a)** Take any points $x_1,\dots,x_n$ and any $c \in \mathbb{R}^n$. Then
+
+$$\sum_{i,j} c_i c_j\, k'(x_i,x_j) = \sum_{i,j} c_i c_j\, k(u(x_i), u(x_j)) \ge 0,$$
+
+because the right-hand side is the PSD quadratic form of $k$ evaluated at the
+points $u(x_1),\dots,u(x_n) \in \mathcal{U}$. Nothing is required of $u$ — not
+continuity, not injectivity, not even measurability. Repeated images are fine:
+if $u(x_1) = u(x_2)$ the Gram matrix is singular, which is permitted (*semi*-
+definite), and it says the prior treats those two inputs as the same point.
+
+**(b)** Take $u(x) = (\cos(2\pi x/p), \sin(2\pi x/p))$, the wrapping of the
+line onto a circle, and $k$ the RBF on $\mathbb{R}^2$. Then
+$\lVert u(x)-u(x')\rVert^2 = 4\sin^2(\pi(x-x')/p)$, so
+$k(u(x),u(x')) = s^2\exp(-2\sin^2(\pi(x-x')/p)/\ell^2)$ — the periodic kernel
+exactly, PSD for free. The alternative route, showing directly that
+$\exp(-2\sin^2(\pi\tau/p)/\ell^2)$ has a non-negative Fourier transform in
+$\tau$ (Bochner, Sec. 8.1), is true but real work; MacKay's construction gets
+it by *composition*, which is the general lesson: build new kernels from old
+ones with operations that preserve the quadratic form (sums, products,
+warpings) rather than verifying each from scratch.
+
+**(c)** The Gibbs kernel is not $k(u(x),u(x'))$ for any fixed base kernel $k$
+and map $u$. Its *shape* changes from point to point — a wide bump near inputs
+where $\ell$ is large, a narrow one where $\ell$ is small — and (a) only ever
+relabels inputs, it never reshapes the kernel. Composition arguments cannot
+produce a nonstationary kernel out of a stationary one.
+
+What does work is Gibbs's (1997) construction, which builds the kernel as an
+honest inner product: place a Gaussian basis function of width $\ell(x)$ at
+every input and integrate their product over the whole line. That integral
+*is* $\int \phi_x(u)\phi_{x'}(u)\,du$, manifestly a PSD form, and evaluating it
+in closed form produces both factors — the exponential
+$\exp(-(x-x')^2/(\ell(x)^2+\ell(x')^2))$ **and** the prefactor
+$\sqrt{2\ell(x)\ell(x')/(\ell(x)^2+\ell(x')^2)}$. So the prefactor is not
+cosmetic normalization: it is part of what the overlap integral evaluates to,
+and dropping it breaks positive-definiteness. It is also what makes the
+$\ell \equiv$ const case collapse *exactly* to the RBF (the prefactor becomes
+1), which is the cheapest available test of having got it right.
+
+*Check it:* `tests/test_kernels.py::test_kernel_matrices_are_positive_semidefinite`
+asserts a non-negative spectrum for every kernel in the library, and
+`::test_gibbs_recovers_rbf_exactly_when_the_lengthscale_is_constant` pins the
+$b = 0$ collapse — which a missing or mistyped prefactor fails.
+
+</details>
+
+### Exercise 4 — Why random features starve the error bars
+
+Sec. 8.5 reports that with $D$ fixed and $n$ large, the RFF posterior variance
+collapses *everywhere*, including far from the data where the exact GP returns
+roughly the prior $s^2$. Prove it.
+
+**(a)** From the weight-space posterior (8.4), the predictive variance is
+$\operatorname{Var}[f(x_*)] = \sigma^2 z(x_*)^\top A^{-1} z(x_*)$ with
+$A = Z^\top Z + \sigma^2 I_D$. Bound it above using $\lambda_{\min}(A)$ and the
+exact identity for $\lVert z(x)\rVert^2$ established in Sec. 8.2.
+
+**(b)** Argue that for data covering the input region,
+$\lambda_{\min}(Z^\top Z)$ grows linearly in $n$, and conclude the rate at
+which the RFF posterior variance goes to zero — at **every** $x_*$.
+
+**(c)** Where does the exact GP's variance go instead, and why does the
+argument in (b) not apply to it?
+
+<details>
+<summary>Solution</summary>
+
+**(a)** $A$ is symmetric positive definite, so
+$z^\top A^{-1} z \le \lVert z\rVert^2/\lambda_{\min}(A)$. By the Pythagorean
+identity of Sec. 8.2, $\lVert z(x)\rVert^2 = s^2$ *exactly*, for every $x$ —
+not in expectation. Hence
+
+$$\operatorname{Var}[f(x_*)] \;\le\; \frac{\sigma^2 s^2}{\lambda_{\min}(Z^\top Z) + \sigma^2} \qquad\text{for every } x_*.$$
+
+The bound has no $x_*$ in it. Whatever happens to $\lambda_{\min}$ happens to
+the error bars everywhere at once, which is already the whole phenomenon.
+
+**(b)** $Z^\top Z = \sum_{i=1}^n z(x_i) z(x_i)^\top$ is a sum of $n$ rank-one
+PSD terms. If the inputs are drawn from a distribution whose feature
+second-moment matrix $M = \mathbb{E}[z(x)z(x)^\top]$ is nonsingular, the law of
+large numbers gives $Z^\top Z \approx n M$, so
+$\lambda_{\min}(Z^\top Z) \approx n\,\lambda_{\min}(M) = \Theta(n)$. Then
+
+$$\operatorname{Var}[f(x_*)] = O\!\big(\sigma^2 s^2 / n\big) \to 0$$
+
+uniformly in $x_*$. The mechanism is a counting argument, not a geometric one:
+the prior has exactly $D$ degrees of freedom in total, $n \gg D$ observations
+pin down all of them, and once every direction of $w$ is determined there is
+nothing left anywhere for the model to be uncertain about. Note $M$ is
+nonsingular precisely when the $D$ features are linearly independent as
+functions on the input distribution — so this is not a pathological case, it is
+the generic one.
+
+**(c)** The exact GP's posterior variance at $x_*$ is
+$k(x_*,x_*) - k_*^\top \tilde K^{-1} k_*$, and far from the data $k_* \to 0$
+(the RBF decays), so the variance returns to the prior $s^2$ no matter how
+large $n$ is. The counting argument fails because the exact GP's prior has
+*infinitely* many degrees of freedom: $n$ observations can never exhaust them,
+and the ones that remain live exactly where the data are not. The finite-rank
+approximation replaces "infinitely many directions" with "$D$ directions", and
+the error bars are the first thing to notice.
+
+The practical reading is the one Sec. 8.5 states: RFF approximates the posterior
+*mean* cheaply, and its uncertainty is trustworthy only while $D$ is large
+relative to the number of directions the data determine. `experiments/rff.py`
+measures the failure at $n = 3000$ with a gap in the inputs — exact posterior
+sd at the gap centre $0.97$, $D = 2048$ gives $0.94$, $D = 64$ gives $0.088$.
+
+</details>
+
+### Exercise 5 — The constant in the heteroscedastic fit
+
+`experiments/heteroscedastic.py` fits a second GP to $z_i = \log r_i^2$, the
+log-squared leave-one-out residuals, and then adds $1.2704$ to its prediction
+before exponentiating.
+
+**(a)** For $r \sim N(0,s^2)$, compute $\mathbb{E}[\log r^2]$. (Hint: the
+fractional moments of $\chi^2_1$ are available in closed form; differentiate
+them at $0$.)
+
+**(b)** Why must the correction be applied, and what exactly goes wrong
+without it — quantitatively?
+
+**(c)** The residuals are the *leave-one-out* residuals, not the in-sample
+ones. Why?
+
+<details>
+<summary>Solution</summary>
+
+**(a)** Write $r = s\,z$ with $z \sim N(0,1)$, so $r^2 = s^2 z^2$ and
+$\log r^2 = \log s^2 + \log z^2$ with $z^2 \sim \chi^2_1$. For $\chi^2_k$,
+
+$$\mathbb{E}\big[(\chi^2_k)^t\big] = 2^t\,\frac{\Gamma(k/2 + t)}{\Gamma(k/2)},$$
+
+and since $\tfrac{d}{dt}\mathbb{E}[X^t]\big|_{t=0} = \mathbb{E}[\log X]$
+(differentiate $X^t = e^{t\log X}$ under the expectation), taking $k=1$ gives
+
+$$\mathbb{E}[\log \chi^2_1] = \log 2 + \psi(1/2) = \log 2 + (-\gamma - 2\log 2) = -\gamma - \log 2 = -1.2704,$$
+
+using $\psi(1/2) = -\gamma - 2\log 2$. So
+$\mathbb{E}[\log r^2] = \log s^2 - 1.2704$: the log of a squared draw is a
+*biased* estimator of the log variance, and biased by a universal constant that
+does not depend on $s$ at all.
+
+**(b)** Because a GP fitted to the $z_i$ estimates $\mathbb{E}[\log r^2]$, which
+by (a) is $\log s^2(x) - 1.2704$, not $\log s^2(x)$. Exponentiating without
+correcting returns $s^2(x)\,e^{-1.2704} = 0.281\,s^2(x)$ — every noise variance
+too small by a factor $3.56$, so every error bar too narrow by $\sqrt{3.56} =
+1.89$. That failure is invisible to any shape or smoothness check: the noise
+*profile* would be exactly right, the whole curve just sits too low, and the
+only symptom is under-coverage — which is the one thing the heteroscedastic fit
+exists to fix. Constant bias, silent failure, one line of correction.
+
+The reason it is a constant at all is worth keeping: taking logs turns the
+multiplicative $\chi^2_1$ noise into additive noise of *fixed* distribution,
+which is exactly the condition under which a homoscedastic GP is the right
+model for the second stage. The bias is the price of that convenience, and it
+is a known number rather than something to estimate.
+
+**(c)** An interpolating GP drives its in-sample residuals toward zero — with
+small noise it can pass arbitrarily close to every training point — so
+in-sample $r_i^2$ measures how flexible the first-stage fit was, not how noisy
+the data are, and the second stage would inherit a badly under-estimated noise
+floor. The LOO residuals of Exercise 1 are predictions of held-out points, so
+they contain the noise honestly, and they are free: the same $\alpha_i$ and
+$[\tilde K^{-1}]_{ii}$ the closed form already produced.
+
+*Check it:*
+`tests/test_gp.py::test_log_chi_squared_bias_constant_is_the_number_it_claims_to_be`
+pins the constant against $\gamma + \log 2$ and against a 4-million-draw Monte
+Carlo estimate of $\mathbb{E}[\log z^2]$;
+`::test_two_stage_heteroscedastic_improves_calibration` is the end-to-end
+consequence.
+
+</details>
+
+---
+
 ## References
 
 - C. E. Rasmussen and C. K. I. Williams, *Gaussian Processes for Machine
