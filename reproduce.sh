@@ -78,3 +78,36 @@ echo "=================================================================="
 echo "done in $((SECONDS - started))s. figures/:"
 ls -1 figures/
 echo "=================================================================="
+
+# Check the reproduction claim instead of asserting it. Everything above was
+# just regenerated from seeded code, so any figure that now differs from the
+# committed copy is either an expected machine-dependent one (the two that plot
+# wall-clock) or real drift between the code and what the repo ships -- which is
+# how figures/co2_forecast.png and figures/ntk_linearization.png sat stale, an
+# older environment's bytes, until someone rebuilt them from a clean clone.
+TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    changed=$(git status --porcelain -- figures/ | awk '{print $2}')
+    unexpected=""
+    for f in ${changed}; do
+        case " ${TIMING_FIGURES} " in
+            *" ${f} "*) ;;
+            *) unexpected="${unexpected} ${f}" ;;
+        esac
+    done
+    echo
+    if [ -z "${changed}" ]; then
+        echo "reproduction: every committed figure came back byte-for-byte."
+        echo "(Even the two wall-clock plots landed on identical bytes here.)"
+    elif [ -z "${unexpected}" ]; then
+        echo "reproduction: byte-for-byte except the wall-clock plots, as documented:"
+        for f in ${changed}; do echo "    ${f}   (plots timing; machine-dependent)"; done
+    else
+        echo "reproduction: UNEXPECTED drift -- these differ from the committed copies"
+        echo "and do not plot wall-clock, so the repo is shipping figures its own"
+        echo "code no longer produces. Inspect, then commit the regenerated files:"
+        for f in ${unexpected}; do echo "    ${f}"; done
+        echo "(the wall-clock plots may also differ; that is expected: ${TIMING_FIGURES})"
+    fi
+    echo "=================================================================="
+fi

@@ -505,13 +505,24 @@ pip install -r requirements.txt && pip install -e .
 produced with (Python 3.12.13); `pyproject.toml` keeps lower bounds instead, so
 CI goes on testing against current releases on 3.9 and 3.12.
 
-**How exact is it?** Rerunning the whole suite in that pinned environment
-regenerates 13 of the 15 committed PNGs byte-for-byte: every experiment is
-seeded and NumPy's bit generators are stable across versions, so the datasets,
-the ML-II fits, and the tables are identical. The two files that differ are
+**How exact is it? The script tells you, rather than this paragraph asking to
+be believed.** Rerunning the whole suite in that pinned environment regenerates
+13 of the 15 committed PNGs byte-for-byte: every experiment is seeded and
+NumPy's bit generators are stable across versions, so the datasets, the ML-II
+fits, and the tables are identical. The two files that differ are
 `sklearn_parity.png` and `rff.png`, both of which plot wall-clock and so
 measure the machine — their accuracy claims (agreement to ~1e-10; the
 $D^{-1/2}$ error curve) are the portable ones.
+
+`reproduce.sh` ends by checking exactly that against `git status`, and names
+any *other* figure that changed. That check exists because the claim was false
+when it was written: `co2_forecast.png` and `ntk_linearization.png` had been
+shipping as an older environment's bytes — visually the same figure (the CO₂
+one is identical pixel for pixel, the NTK one differs in 3 pixels of 372k, and
+every number in this README is unchanged), but not what the pinned code
+produces. Nothing would have noticed, because nothing was looking. They have
+been rebuilt; from now on a drifted figure is a line of output on anyone's
+first run.
 
 To run a single experiment instead (timings measured by `reproduce.sh`):
 
@@ -609,9 +620,10 @@ buried.
 | Repo | Built from scratch |
 | --- | --- |
 | **gp-from-scratch** *(this repo)* | GP regression, kernels with hand-derived gradients, ML-II, and the NTK/NNGP wide-network correspondence |
-| [mcmc-from-scratch](https://github.com/porth-bot/mcmc-from-scratch) | Metropolis-Hastings, Gibbs, HMC, MALA, parallel tempering — validated against exact posteriors |
+| [mcmc-from-scratch](https://github.com/porth-bot/mcmc-from-scratch) | Metropolis-Hastings, Gibbs, HMC, MALA, NUTS, parallel tempering — validated against exact posteriors |
 | [grokking-transformer](https://github.com/porth-bot/grokking-transformer) | A transformer that groks modular arithmetic, and the Fourier circuit it learns |
 | [pinn-from-scratch](https://github.com/porth-bot/pinn-from-scratch) | Physics-informed networks: exact autograd PDE residuals against closed-form solutions |
+| [diffusion-from-scratch](https://github.com/porth-bot/diffusion-from-scratch) | Score matching, reverse-time samplers, and the probability-flow ODE — against exact scores at every noise level |
 
 The NTK stack in section 3 is what the other two lean on, which makes the links
 real rather than decorative. pinn-from-scratch's spectral-bias result — a
