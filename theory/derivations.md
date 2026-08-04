@@ -22,6 +22,7 @@ Contents:
 6. Arc-cosine kernels (polar integral for kappa1, orthant probability for kappa0)
 7. NNGP, NTK, and linearized gradient descent (the geometric series)
 8. Bochner's theorem and random Fourier features (the `n^3 -> n D^2` trade)
+9. The variational sparse GP (Titsias): inducing points and the free-energy bound
 
 ---
 
@@ -747,7 +748,222 @@ optimizing the evidence of `k_D` is not the same as optimizing the evidence of
 
 ---
 
-## 9. Exercises
+## 9. The variational sparse GP (Titsias): inducing points and the free-energy bound
+
+Section 8 bought `O(n)` scaling by replacing the kernel with a randomized
+finite-rank surrogate, and paid for it in Sec. 8.5: a rank-`D` prior runs out
+of degrees of freedom and the error bars collapse. This section takes the other
+route to the same `O(n M^2)` cost. Instead of approximating the *kernel*, keep
+the model exactly as it is and approximate the *posterior*, with a variational
+bound whose free parameters are `M` input locations `Z` (Titsias 2009,
+implemented in `gp/sparse.py`). The two failure modes are different, and the
+README's sparse section measures which one bites in a data gap.
+
+### 9.1 Augmentation is exact; the approximation comes later
+
+Introduce **inducing variables** `u = f(Z)` at `M` **inducing inputs**
+`Z in R^{M x d}`. There is nothing approximate about this: `u` is the same GP
+evaluated at `M` more inputs, so `p(f, u)` is the model's own joint and
+
+```
+INT p(y | f) p(f, u) df du = INT p(y | f) p(f) df = p(y),                        (9.1)
+```
+
+the marginal likelihood is untouched. Write `Kuu = k(Z, Z)`, `Kfu = k(X, Z)`,
+`Kff = k(X, X)`. Gaussian conditioning (Sec. 1) on the joint gives
+
+```
+p(u)    = N(u | 0, Kuu)
+p(f|u)  = N( f | Kfu Kuu^{-1} u,  Kff - Qff ),   Qff := Kfu Kuu^{-1} Kuf.        (9.2)
+```
+
+`Qff` is the **Nystrom approximation** to `Kff`: the part of `f` that `u`
+explains. Its complement `Kff - Qff` is a conditional covariance, hence PSD,
+and it is zero exactly when `u` determines `f`. Both facts get used below.
+
+### 9.2 The variational family, and why `Z` cannot overfit
+
+Approximate `p(f, u | y)` by
+
+```
+q(f, u) = p(f | u) q(u),        q(u) = N(u | m, S) free.                         (9.3)
+```
+
+The choice that makes the whole thing work is keeping the *exact* conditional
+`p(f | u)` as the first factor rather than a free `q(f | u)`: it is what makes
+the `Kff` terms cancel in a moment, and it encodes the modelling assumption
+that `u` is a sufficient summary of `f`.
+
+The standard evidence lower bound, with the augmented model (9.1):
+
+```
+F = E_q[ log p(y | f) ] - KL( q(f, u) || p(f, u) )  <=  log p(y).                (9.4)
+```
+
+Now the point that governs everything else about this method. `Z` appears
+*only* in `q`, never in the model: the left side of (9.1) does not depend on
+`Z`, so `log p(y)` does not either. Moving `Z` therefore cannot change what is
+being bounded — it can only change how tight the bound is. Maximizing `F` over
+`Z` is minimizing `KL(q || posterior)`, and adding more inducing points can
+only improve the bound toward the same fixed ceiling. This is the structural
+difference from a model parameter, whose optimum trades data fit against a
+complexity penalty and can overfit; `Z` has nothing to trade. It is also the
+difference from FITC (Sec. 9.6), where `Z` *does* enter the model.
+
+### 9.3 Collapsing the bound
+
+Substitute (9.3) into (9.4). The `p(f | u)` in `q` cancels against the one in
+`p(f, u) = p(f | u) p(u)`, leaving only the `u` marginals in the KL:
+
+```
+F = INT q(u) [ INT p(f|u) log p(y|f) df ] du  -  KL( q(u) || p(u) ).             (9.5)
+```
+
+**The inner integral.** With `p(y | f) = N(y | f, sigma^2 I)` and
+`f | u ~ N(mu_u, Sigma)`, `mu_u = Kfu Kuu^{-1} u`, `Sigma = Kff - Qff`:
+
+```
+E_{p(f|u)} [ log N(y | f, sigma^2 I) ]
+    = -n/2 log(2 pi sigma^2) - 1/(2 sigma^2) E || y - f ||^2
+    = -n/2 log(2 pi sigma^2) - 1/(2 sigma^2) [ ||y - mu_u||^2 + tr Sigma ]
+    = log N(y | mu_u, sigma^2 I)  -  1/(2 sigma^2) tr( Kff - Qff ).              (9.6)
+```
+
+The bias-variance split `E||y - f||^2 = ||y - E f||^2 + tr Cov(f)` is the only
+step, and the trace term drops out of the `u`-integral because `Sigma` does not
+depend on `u`. So
+
+```
+F = INT q(u) log N(y | Kfu Kuu^{-1} u, sigma^2 I) du - KL(q(u)||p(u))
+    - 1/(2 sigma^2) tr(Kff - Qff).                                               (9.7)
+```
+
+**Optimal `q(u)`.** The first two terms of (9.7) are
+
+```
+INT q(u) log [ N(y | Kfu Kuu^{-1} u, sigma^2 I) p(u) / q(u) ] du,
+```
+
+which is the standard variational bound on `log INT N(y | Kfu Kuu^{-1}u,
+sigma^2 I) p(u) du` — a bound saturated by the exact posterior of the *linear*
+Gaussian model `y = (Kfu Kuu^{-1}) u + eps`, `u ~ N(0, Kuu)`. That marginal is
+available in closed form: the linear map sends `Cov(u) = Kuu` to
+`Kfu Kuu^{-1} Kuu Kuu^{-1} Kuf = Qff`. Substituting the maximizer collapses `q`
+out entirely and leaves
+
+```
+F = log N( y | 0, Qff + sigma^2 I )  -  1/(2 sigma^2) tr( Kff - Qff ).           (9.8)
+```
+
+Read (9.8) as two pieces that pull in opposite directions:
+
+- The first is exactly the log evidence of a **different, low-rank model** —
+  the deterministic-inducing-conditional (DTC) approximation, `Kff -> Qff`.
+  On its own it is not a bound on anything: `Qff` is a *smaller* covariance
+  than `Kff`, so DTC can happily report an evidence *above* the truth.
+- The second term, `-tr(Kff - Qff) / (2 sigma^2)`, is what turns it into a
+  bound. It is a sum of `n` non-negative terms, `k(x_i, x_i) - q(x_i, x_i)`,
+  each one the posterior variance of `f(x_i)` given `u` — the amount of `f`
+  that the inducing set fails to explain. It is scale-free in a useful sense:
+  it is measured in units of `sigma^2`, so the same geometric shortfall matters
+  more when the data are precise.
+
+That is the whole mechanism. **The trace term is the penalty on a bad inducing
+set**, and it is what stops the optimizer from parking `Z` somewhere cheap.
+
+### 9.4 The exact-recovery limit, which is also the test
+
+Set `Z = X`, so `M = n` and `Kfu = Kuu = Kff`. Then
+
+```
+Qff = Kff Kff^{-1} Kff = Kff        =>        tr(Kff - Qff) = 0,
+```
+
+and (9.8) reduces to `log N(y | 0, Kff + sigma^2 I)`, the exact log marginal
+likelihood of Sec. 2. The bound is tight, as it must be: `u = f(X)` is a
+sufficient summary of `f` at the data, so nothing is being approximated. The
+same substitution in the predictive equations below returns the exact
+posterior. `tests/test_sparse.py::test_z_equals_x_recovers_the_exact_gp` is
+that statement — the algebra is pinned to an already-trusted implementation
+*before* anything approximate is measured. It checks the bound to `1e-7` and
+the predictive variance to `1e-8`; the reason those are not `1e-16` is the
+jitter, quantified in Sec. 9.5.
+
+### 9.5 Predictive equations, and the numerics that make them safe
+
+The maximizer of (9.7) is `q(u) = N(u | m, S)` with the linear-Gaussian
+posterior for `u`. Writing `Sig := Kuu + sigma^{-2} Kuf Kfu`,
+
+```
+S = Kuu Sig^{-1} Kuu,        m = sigma^{-2} Kuu Sig^{-1} Kuf y.                  (9.9)
+```
+
+Pushing that through `p(f* | u)` (Sec. 1 again) and marginalizing `u`:
+
+```
+mean(X*) = sigma^{-2} K*u Sig^{-1} Kuf y
+var(X*)  = K** - K*u Kuu^{-1} Ku*  +  K*u Sig^{-1} Ku*.                         (9.10)
+```
+
+The middle term is the drop from conditioning on `u`; the last adds back the
+uncertainty *in* `u`. Far from every inducing point the two middle-and-last
+terms cancel and the variance returns to the prior `k(x*, x*)` — the property
+random Fourier features lose (Sec. 8.5), and the reason to expect sparse GPs to
+keep their error bars in a gap.
+
+**Numerics.** No inverse is formed and nothing bigger than `M x M` is
+factorized. With `Luu = chol(Kuu + jitter I)` and
+
+```
+A  = Luu^{-1} Kuf                (M, n)      =>   Qff = A^T A
+B  = I_M + sigma^{-2} A A^T      (M, M),     LB = chol(B)
+c  = sigma^{-2} LB^{-1} A y      (M,)
+```
+
+the matrix determinant lemma and Woodbury turn (9.8) into `O(n M^2)`:
+
+```
+log|Qff + sigma^2 I| = n log sigma^2 + 2 SUM_i log (LB)_ii
+y^T (Qff + sigma^2 I)^{-1} y = sigma^{-2} y^T y - c^T c
+tr(Kff - Qff) = SUM_i k(x_i, x_i) - ||A||_F^2                                   (9.11)
+```
+
+— note the trace never builds `Kff`, only its diagonal. For prediction,
+`Sig = Luu B Luu^T`, so with `As = Luu^{-1} Ku*` and `tmp = LB^{-1} As`:
+
+```
+mean = tmp^T c,      var = diag(K**) - colsum(As^2) + colsum(tmp^2).            (9.12)
+```
+
+The `jitter` on `Kuu` is not cosmetic here the way it is for `K_y` in Sec. 3.
+`Kuu` carries *no* noise term, and optimizing `Z` (Sec. 9.2) pushes inducing
+points toward informative regions, which means toward each other; `Kuu`
+genuinely approaches singularity during a fit. The consequence is that `Z = X`
+recovery is exact only up to the jitter: perturbing `Kuu -> Kuu + jI` replaces
+`Qff` by `Kff(Kff + jI)^{-1}Kff`, whose eigenvalues are
+`lam - lam^2/(lam + j) = lam j / (lam + j) <= j` below `Kff`'s. So the recovery
+error is `O(j)` and the residual trace term is `O(n j)`, not exactly zero.
+`test_recovery_error_is_exactly_the_jitter` measures that: sweeping `j` over
+four decades moves both by a factor of ten per decade, with no floor — which is
+what an implementation with correct algebra and one loaded diagonal looks like,
+and what an algebra error would not.
+
+### 9.6 What is deliberately not here yet
+
+- **FITC** (Snelson & Ghahramani 2006) keeps the diagonal of `Kff - Qff`
+  inside the covariance instead of penalizing it: `Qff + diag(Kff - Qff) +
+  sigma^2 I`. It is a different *model*, not a bound on this one, so its `Z`
+  are model parameters and the argument of Sec. 9.2 does not apply to them.
+- **SVGP** (Hensman et al. 2013) keeps `q(u)` uncollapsed so the bound
+  decomposes over data points and can be minibatched, and admits non-Gaussian
+  likelihoods. The collapsed bound (9.8) cannot: it needs all of `y` at once.
+- Gradients of (9.8) — including with respect to `Z`, which is the part that is
+  easy to get subtly wrong. Until they exist, `Z` is whatever the caller
+  chooses, and ML-II over the sparse bound is not available.
+
+---
+
+## 10. Exercises
 
 Five problems whose answers are already somewhere in this repo — as a line of
 code, a measured number, or a test. Solutions are collapsed; each one ends with
@@ -1123,3 +1339,17 @@ consequence.
 - Z. Wang, C. Gehring, P. Kohli, and S. Jegelka, "Batched Large-Scale Bayesian
   Optimization in High-Dimensional Spaces," *AISTATS* 2018. (Variance
   starvation, Sec. 8.5.)
+- M. K. Titsias, "Variational Learning of Inducing Variables in Sparse
+  Gaussian Processes," *AISTATS* 2009. (The free-energy bound (9.8), the
+  collapsed `q(u)`, and the argument that `Z` are variational parameters.)
+- J. Quiñonero-Candela and C. E. Rasmussen, "A Unifying View of Sparse
+  Approximate Gaussian Process Regression," *JMLR* 2005. (SoR/DTC/FITC as
+  different effective priors; `Qff` and the Nystrom view, Sec. 9.3.)
+- E. Snelson and Z. Ghahramani, "Sparse Gaussian Processes using Pseudo-inputs,"
+  *NeurIPS* 2006. (FITC, Sec. 9.6.)
+- M. Bauer, M. van der Wilk, and C. E. Rasmussen, "Understanding Probabilistic
+  Sparse Gaussian Process Approximations," *NeurIPS* 2016. (What VFE and FITC
+  each do to the fitted noise and the predictive variance — the Day 4
+  comparison.)
+- J. Hensman, N. Fusi, and N. D. Lawrence, "Gaussian Processes for Big Data,"
+  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.6.)
