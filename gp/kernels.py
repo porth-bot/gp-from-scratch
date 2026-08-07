@@ -12,10 +12,20 @@ Every kernel is parameterized by the *logs* of its positive hyperparameters
 Each kernel implements:
 
 - ``__call__(X1, X2)``: the covariance matrix K, shape (n1, n2).
-- ``grads(X)``: list of dK/dtheta_i on the symmetric train matrix (X, X),
-  in the same order as ``theta``. These feed the marginal-likelihood
-  gradient (gp.py); all of them are verified against central finite
-  differences in tests/test_kernels.py.
+- ``grads(X1, X2=None)``: list of dK/dtheta_i on the covariance between two
+  input sets, in the same order as ``theta``. With ``X2`` omitted this is the
+  symmetric train matrix (X, X) that the marginal-likelihood gradient needs
+  (gp.py); the *cross* case is what the sparse bound needs, where the
+  hyperparameters have to be differentiated through ``k(Z, X)`` with Z and X
+  different sets (gp/sparse.py). All of them are verified against central
+  finite differences in tests/test_kernels.py.
+- ``dK_dX1(X1, X2)``: derivative of each entry with respect to the *left*
+  input's coordinates, shape (n1, n2, d). This is a derivative in input
+  space, not parameter space, and it exists so that inducing locations can be
+  optimized. It is defined on the leaves that are smooth functions of the
+  squared distance; the ones that are not (Matern nu=0.5 at r=0) or that
+  simply have not been derived (Gibbs) raise rather than return something
+  plausible-looking.
 
 Composition: ``Sum`` and ``Product`` combine kernels; their gradients follow
 from linearity and the product rule. Observation noise is NOT a kernel here
@@ -108,9 +118,41 @@ class Kernel:
         """The covariance matrix K = k(X1, X2). Overridden by every leaf."""
         raise NotImplementedError
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
         """dK/dtheta_i for *all* params (before the fixed mask). Overridden."""
         raise NotImplementedError
+
+    def _dk_dsqdist(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        """dk/d(r^2) elementwise, for kernels that are functions of r^2 alone.
+
+        Supplying this is how a stationary leaf gets ``dK_dX1`` for free: the
+        chain rule through ``r^2 = ||x - x'||^2`` does the rest. Leaves that
+        are not functions of r^2 (ARD, whose distance is lengthscale-weighted
+        per dimension; Gibbs, which is not stationary at all) override
+        ``dK_dX1`` directly or decline it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define an input-space derivative"
+        )
+
+    def dK_dX1(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        """d k(x1_i, x2_j) / d x1_i, shape (n1, n2, d).
+
+        Only the *left* argument is differentiated. For a stationary kernel the
+        right-hand derivative is the negative of this one, but nothing here
+        relies on that -- the sparse bound's Z-gradient (gp/sparse.py) needs
+        only the left slot, because it differentiates k(Z, X) and k(Z, Z) with
+        respect to Z and reaches the second Z of k(Z, Z) by symmetry of the
+        contracting matrix rather than by a second derivative.
+
+        With k = f(r^2) and r^2 = ||x - x'||^2, d r^2 / d x_a = 2 (x_a - x'_a),
+        so the whole thing is ``2 * f'(r^2) * (x - x')``.
+        """
+        X1 = np.atleast_2d(np.asarray(X1, dtype=float))
+        X2 = np.atleast_2d(np.asarray(X2, dtype=float))
+        g = self._dk_dsqdist(X1, X2)                        # (n1, n2)
+        diff = X1[:, None, :] - X2[None, :, :]              # (n1, n2, d)
+        return 2.0 * g[:, :, None] * diff
 
     def _mask(self, fixed: FixedArg) -> np.ndarray:
         """Build the boolean fixed-mask from ``fixed`` (called by subclasses).
@@ -156,9 +198,14 @@ class Kernel:
     def n_params(self) -> int:
         return int(self.free.sum())
 
-    def grads(self, X: np.ndarray) -> list[np.ndarray]:
-        """dK/dtheta_i for the free parameters, in ``theta`` order."""
-        full = self._grads_full(X)
+    def grads(self, X1: np.ndarray,
+              X2: Optional[np.ndarray] = None) -> list[np.ndarray]:
+        """dK/dtheta_i for the free parameters, in ``theta`` order.
+
+        ``X2`` defaults to ``X1`` (the symmetric train matrix). Passing a
+        different second set gives the cross-covariance gradients dK(X1,X2)/dtheta.
+        """
+        full = self._grads_full(X1, X1 if X2 is None else X2)
         return [g for g, fixed in zip(full, self._fixed) if not fixed]
 
     def __add__(self, other: "Kernel") -> "Sum":
@@ -177,6 +224,8 @@ class RBF(Kernel):
     theta = (log s2, log l):
         dK/d(log s2) = K
         dK/d(log l)  = K * r^2 / l^2      [d/dl = K r^2/l^3, times l]
+
+    Input space: k = s2 exp(-r^2 / (2 l^2)), so dk/d(r^2) = -k / (2 l^2).
     """
 
     names = ("s2", "l")
@@ -189,11 +238,15 @@ class RBF(Kernel):
         s2, l = np.exp(self._theta)
         return s2 * np.exp(-0.5 * sqdist(X1, X2) / l**2)
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
         _, l = np.exp(self._theta)
-        d2 = sqdist(X, X)
-        K = self(X, X)
+        d2 = sqdist(X1, X2)
+        K = self(X1, X2)
         return [K, K * d2 / l**2]
+
+    def _dk_dsqdist(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        _, l = np.exp(self._theta)
+        return -self(X1, X2) / (2.0 * l**2)
 
 
 class ARD(Kernel):
@@ -217,6 +270,13 @@ class ARD(Kernel):
 
     Each lengthscale gradient sees only its own dimension's squared distances,
     which is what lets ML-II move them independently.
+
+    Input space: the distance is lengthscale-weighted per dimension, so this is
+    not a function of the plain r^2 and ``_dk_dsqdist`` does not apply.
+    Differentiating the exponent directly,
+    ``dk/dx_d = -k (x_d - x'_d) / l_d^2`` -- the isotropic result with each
+    dimension divided by its own l_d, which also says a suppressed dimension
+    (large l_d) exerts almost no pull on an inducing point's location.
     """
 
     def __init__(
@@ -250,16 +310,24 @@ class ARD(Kernel):
         s2 = np.exp(self._theta[0])
         return s2 * np.exp(-0.5 * sqdist(self._scaled(X1), self._scaled(X2)))
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
-        X = np.atleast_2d(X)
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
+        X1 = np.atleast_2d(X1)
+        X2 = np.atleast_2d(X2)
         l = np.exp(self._theta[1:])
-        K = self(X, X)
+        K = self(X1, X2)
         grads = [K]
         for d in range(self.dim_in):
-            xd = X[:, d]
-            per_dim_d2 = (xd[:, None] - xd[None, :]) ** 2
+            per_dim_d2 = (X1[:, d][:, None] - X2[:, d][None, :]) ** 2
             grads.append(K * per_dim_d2 / l[d] ** 2)
         return grads
+
+    def dK_dX1(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        X1 = np.atleast_2d(np.asarray(X1, dtype=float))
+        X2 = np.atleast_2d(np.asarray(X2, dtype=float))
+        l = np.exp(self._theta[1:])
+        K = self(X1, X2)
+        diff = X1[:, None, :] - X2[None, :, :]
+        return -K[:, :, None] * diff / (l**2)[None, None, :]
 
 
 class Matern(Kernel):
@@ -275,6 +343,18 @@ class Matern(Kernel):
         nu=0.5: dK/d(log l) = s2 * a e^{-a}
         nu=1.5: dK/d(log l) = s2 * a^2 e^{-a}
         nu=2.5: dK/d(log l) = s2 * (a^2 (1 + a) / 3) e^{-a}
+
+    Input space. With da/d(r^2) = a / (2 r^2) and a^2 = 2 nu r^2 / l^2, the
+    apparent 1/r^2 singularity cancels against the factor of a that every
+    dk/da carries -- except at nu = 0.5, where it does not:
+
+        nu=0.5: dk/da = -s2 e^{-a}            =>  dk/d(r^2) = -s2 e^{-a} a/(2 r^2)
+        nu=1.5: dk/da = -s2 a e^{-a}          =>  dk/d(r^2) = -s2 e^{-a} * 3/(2 l^2)
+        nu=2.5: dk/da = -s2 a (1+a) e^{-a}/3  =>  dk/d(r^2) = -s2 e^{-a}(1+a) * 5/(6 l^2)
+
+    The nu=0.5 case really is non-differentiable at coincident points -- the
+    OU process has nowhere-differentiable paths and its kernel has a cusp at
+    r = 0 -- so ``dK_dX1`` raises there rather than returning a large number.
     """
 
     names = ("s2", "l")
@@ -302,9 +382,9 @@ class Matern(Kernel):
             poly = 1.0 + a + a**2 / 3.0
         return s2 * poly * np.exp(-a)
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
         s2, _ = np.exp(self._theta)
-        a = self._a(X, X)
+        a = self._a(X1, X2)
         e = np.exp(-a)
         if self.nu == 0.5:
             dlogl = s2 * a * e
@@ -312,7 +392,21 @@ class Matern(Kernel):
             dlogl = s2 * a**2 * e
         else:
             dlogl = s2 * (a**2 * (1.0 + a) / 3.0) * e
-        return [self(X, X), dlogl]
+        return [self(X1, X2), dlogl]
+
+    def _dk_dsqdist(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        if self.nu == 0.5:
+            raise NotImplementedError(
+                "Matern nu=0.5 has a cusp at r=0: k = s2 exp(-r/l) is not "
+                "differentiable in x at coincident points, so there is no "
+                "input-space gradient to hand an optimizer. Use nu>=1.5."
+            )
+        s2, l = np.exp(self._theta)
+        a = self._a(X1, X2)
+        e = np.exp(-a)
+        if self.nu == 1.5:
+            return -s2 * e * 1.5 / l**2
+        return -s2 * e * (1.0 + a) * 5.0 / (6.0 * l**2)
 
 
 class Periodic(Kernel):
@@ -326,6 +420,13 @@ class Periodic(Kernel):
         dK/d(log s2) = K
         dK/d(log l)  = K * 4 sin^2(pi r / p) / l^2
         dK/d(log p)  = K * (2 pi r / (p l^2)) * sin(2 pi r / p)
+
+    Input space: dk/dr = -(2 pi / (p l^2)) k sin(2 pi r / p), and dividing by
+    2r to get dk/d(r^2) leaves a 0/0 at coincident points whose limit is
+    finite. Writing sin(2 pi r/p)/r as (2 pi/p) sinc(2r/p) with numpy's
+    normalized sinc removes the branch entirely and is exact at r = 0:
+
+        dk/d(r^2) = -(2 pi^2 / (p^2 l^2)) k sinc(2 r / p).
     """
 
     names = ("s2", "l", "p")
@@ -340,16 +441,21 @@ class Periodic(Kernel):
         r = np.sqrt(sqdist(X1, X2))
         return s2 * np.exp(-2.0 * np.sin(np.pi * r / p) ** 2 / l**2)
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
         _, l, p = np.exp(self._theta)
-        r = np.sqrt(sqdist(X, X))
-        K = self(X, X)
+        r = np.sqrt(sqdist(X1, X2))
+        K = self(X1, X2)
         s = np.sin(np.pi * r / p)
         return [
             K,
             K * 4.0 * s**2 / l**2,
             K * (2.0 * np.pi * r / (p * l**2)) * np.sin(2.0 * np.pi * r / p),
         ]
+
+    def _dk_dsqdist(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        _, l, p = np.exp(self._theta)
+        r = np.sqrt(sqdist(X1, X2))
+        return -(2.0 * np.pi**2 / (p**2 * l**2)) * self(X1, X2) * np.sinc(2.0 * r / p)
 
 
 class RationalQuadratic(Kernel):
@@ -372,6 +478,11 @@ class RationalQuadratic(Kernel):
     Both r-dependent gradients vanish on the diagonal (r = 0, B = 1) and, in
     the alpha -> infinity limit, reduce to the RBF's (the log-alpha gradient
     -> 0, log-l gradient -> K r^2/l^2).
+
+    Input space: dk/d(r^2) = -k / (2 l^2 B), the RBF's -k/(2 l^2) divided by B.
+    Since B >= 1 and grows with r, the pull an RQ kernel exerts on a distant
+    point decays polynomially rather than exponentially -- the same heavy tail,
+    seen from the optimizer's side.
     """
 
     names = ("s2", "l", "alpha")
@@ -389,14 +500,18 @@ class RationalQuadratic(Kernel):
         s2, _, alpha = np.exp(self._theta)
         return s2 * self._B(X1, X2) ** (-alpha)
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
         _, l, alpha = np.exp(self._theta)
-        d2 = sqdist(X, X)
+        d2 = sqdist(X1, X2)
         B = 1.0 + d2 / (2.0 * alpha * l**2)
-        K = self(X, X)
+        K = self(X1, X2)
         dlogl = K * (d2 / l**2) / B
         dlogalpha = K * (-alpha * np.log(B) + d2 / (2.0 * l**2 * B))
         return [K, dlogl, dlogalpha]
+
+    def _dk_dsqdist(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        _, l, _ = np.exp(self._theta)
+        return -self(X1, X2) / (2.0 * l**2 * self._B(X1, X2))
 
 
 class Gibbs(Kernel):
@@ -492,19 +607,26 @@ class Gibbs(Kernel):
         prefactor = np.sqrt(2.0 * l1 * l2 / S)
         return s2 * prefactor * np.exp(-(d**2) / S)
 
-    def _grads_full(self, X: np.ndarray) -> list[np.ndarray]:
-        l = self.lengthscale(X)
-        l1 = l[:, None]
-        l2 = l[None, :]
+    def _grads_full(self, X1: np.ndarray, X2: np.ndarray) -> list[np.ndarray]:
+        l1 = self.lengthscale(X1)[:, None]
+        l2 = self.lengthscale(X2)[None, :]
         S = l1**2 + l2**2
-        x1 = X[:, 0][:, None]
-        x2 = X[:, 0][None, :]
+        x1 = np.atleast_2d(X1)[:, 0][:, None]
+        x2 = np.atleast_2d(X2)[:, 0][None, :]
         d2 = (x1 - x2) ** 2
 
-        K = self(X, X)
+        K = self(X1, X2)
         A = 0.5 - l1**2 / S + 2.0 * l1**2 * d2 / S**2
         A2 = 0.5 - l2**2 / S + 2.0 * l2**2 * d2 / S**2
         return [K, K * (A + A2), K * (x1 * A + x2 * A2)]
+
+    def dK_dX1(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        raise NotImplementedError(
+            "Gibbs is non-stationary: x enters through l(x) as well as through "
+            "x - x', so the input-space derivative has an extra term and has "
+            "not been derived here. Sparse GPs with a learned Z therefore do "
+            "not support this kernel."
+        )
 
 
 class Sum(Kernel):
@@ -547,8 +669,12 @@ class Sum(Kernel):
     def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         return self.k1(X1, X2) + self.k2(X1, X2)
 
-    def grads(self, X: np.ndarray) -> list[np.ndarray]:
-        return self.k1.grads(X) + self.k2.grads(X)
+    def grads(self, X1: np.ndarray,
+              X2: Optional[np.ndarray] = None) -> list[np.ndarray]:
+        return self.k1.grads(X1, X2) + self.k2.grads(X1, X2)
+
+    def dK_dX1(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        return self.k1.dK_dX1(X1, X2) + self.k2.dK_dX1(X1, X2)
 
 
 class Product(Kernel):
@@ -574,6 +700,14 @@ class Product(Kernel):
     def __call__(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         return self.k1(X1, X2) * self.k2(X1, X2)
 
-    def grads(self, X: np.ndarray) -> list[np.ndarray]:
-        K1, K2 = self.k1(X, X), self.k2(X, X)
-        return [g * K2 for g in self.k1.grads(X)] + [K1 * g for g in self.k2.grads(X)]
+    def grads(self, X1: np.ndarray,
+              X2: Optional[np.ndarray] = None) -> list[np.ndarray]:
+        X2 = X1 if X2 is None else X2
+        K1, K2 = self.k1(X1, X2), self.k2(X1, X2)
+        return ([g * K2 for g in self.k1.grads(X1, X2)]
+                + [K1 * g for g in self.k2.grads(X1, X2)])
+
+    def dK_dX1(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        K1, K2 = self.k1(X1, X2), self.k2(X1, X2)
+        return (self.k1.dK_dX1(X1, X2) * K2[:, :, None]
+                + K1[:, :, None] * self.k2.dK_dX1(X1, X2))

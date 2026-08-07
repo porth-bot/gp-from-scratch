@@ -313,3 +313,163 @@ def test_gibbs_ml_ii_recovers_the_tilt_and_beats_rbf_on_a_chirp():
     b = gibbs.kernel._theta[2]
     assert b < -0.2  # lengthscale shrinks with x, as the chirp demands
     assert gibbs.log_marginal_likelihood() > rbf.log_marginal_likelihood() + 5.0
+
+
+# ---------------------------------------------------------------------------
+# Cross-covariance gradients: dK(X1, X2)/dtheta with X1 != X2
+# ---------------------------------------------------------------------------
+#
+# The symmetric case above is what exact ML-II needs. The sparse bound needs
+# the cross case, because its hyperparameter gradient runs through k(Z, X)
+# with Z and X different point sets (gp/sparse.py, Sec. 9.6). A gradient that
+# is right on the diagonal block and wrong off it would pass every test above.
+
+
+def finite_diff_grads_cross(kernel, X1, X2, eps=1e-6):
+    """Central differences of K(X1, X2) w.r.t. each free theta_i."""
+    out = []
+    theta0 = kernel.theta
+    for i in range(kernel.n_params):
+        bumped = []
+        for sign in (+1, -1):
+            t = theta0.copy()
+            t[i] += sign * eps
+            kernel.theta = t
+            bumped.append(kernel(X1, X2))
+        out.append((bumped[0] - bumped[1]) / (2 * eps))
+    kernel.theta = theta0
+    return out
+
+
+@pytest.mark.parametrize("kernel", ALL_KERNELS, ids=IDS)
+def test_cross_covariance_gradients_match_finite_differences(kernel):
+    X1 = RNG.uniform(-2, 2, size=(6, 1))
+    X2 = RNG.uniform(-2, 2, size=(9, 1))          # different size AND positions
+    analytic = kernel.grads(X1, X2)
+    numeric = finite_diff_grads_cross(kernel, X1, X2)
+    assert len(analytic) == kernel.n_params
+    for a, n in zip(analytic, numeric):
+        assert a.shape == (6, 9)
+        np.testing.assert_allclose(a, n, rtol=1e-5, atol=1e-7)
+
+
+def test_cross_gradients_reduce_to_the_symmetric_ones_when_the_sets_coincide():
+    """grads(X) is grads(X, X): the one-argument spelling every existing caller
+    uses must not have changed meaning."""
+    X = RNG.uniform(-2, 2, size=(7, 1))
+    for kernel in ALL_KERNELS:
+        for a, b in zip(kernel.grads(X), kernel.grads(X, X)):
+            np.testing.assert_allclose(a, b, rtol=0, atol=0)
+
+
+def test_ard_cross_gradients_match_finite_differences_multidim():
+    k = ARD(s2=1.3, lengthscales=[0.5, 1.7, 0.9])
+    X1 = RNG.uniform(-2, 2, size=(5, 3))
+    X2 = RNG.uniform(-2, 2, size=(8, 3))
+    for a, n in zip(k.grads(X1, X2), finite_diff_grads_cross(k, X1, X2)):
+        np.testing.assert_allclose(a, n, rtol=1e-5, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Input-space derivatives: dk(x, x')/dx
+# ---------------------------------------------------------------------------
+#
+# Parameter gradients move the kernel; these move the *points*. They exist so
+# inducing locations can be optimized (gp/sparse.py), and they are the piece
+# with no symmetric-case safety net -- nothing else in the repo differentiates
+# a kernel with respect to its inputs.
+
+DIFFERENTIABLE_KERNELS = [
+    RBF(s2=2.0, l=0.7),
+    Matern(nu=1.5, s2=0.8, l=1.3),
+    Matern(nu=2.5, s2=1.1, l=0.5),
+    Periodic(s2=1.2, l=0.8, p=2.3),
+    RationalQuadratic(s2=1.3, l=0.9, alpha=0.5),
+    RationalQuadratic(s2=0.7, l=1.4, alpha=5.0),
+    Sum(RBF(s2=1.0, l=0.5), Matern(nu=1.5, s2=0.5, l=2.0)),
+    Product(RBF(s2=1.0, l=1.5), Periodic(s2=0.9, l=1.1, p=1.7)),
+]
+DIFF_IDS = ["rbf", "matern32", "matern52", "periodic", "rq_alpha0.5",
+            "rq_alpha5", "sum", "product"]
+
+
+def finite_diff_dK_dX1(kernel, X1, X2, eps=1e-6):
+    """Central differences of K(X1, X2) w.r.t. each coordinate of X1."""
+    n1, d = X1.shape
+    out = np.zeros((n1, X2.shape[0], d))
+    for i in range(n1):
+        for a in range(d):
+            bumped = []
+            for sign in (+1, -1):
+                Xp = X1.copy()
+                Xp[i, a] += sign * eps
+                bumped.append(kernel(Xp, X2))
+            # only row i moves, so only row i of the difference is meaningful
+            out[i, :, a] = ((bumped[0] - bumped[1]) / (2 * eps))[i]
+    return out
+
+
+@pytest.mark.parametrize("kernel", DIFFERENTIABLE_KERNELS, ids=DIFF_IDS)
+def test_input_derivatives_match_finite_differences_1d(kernel):
+    X1 = RNG.uniform(-2, 2, size=(5, 1))
+    X2 = RNG.uniform(-2, 2, size=(7, 1))
+    analytic = kernel.dK_dX1(X1, X2)
+    assert analytic.shape == (5, 7, 1)
+    np.testing.assert_allclose(
+        analytic, finite_diff_dK_dX1(kernel, X1, X2), rtol=1e-5, atol=1e-7
+    )
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [RBF(s2=1.4, l=0.9), Matern(nu=2.5, s2=0.9, l=1.2),
+     RationalQuadratic(s2=1.1, l=0.8, alpha=1.5),
+     ARD(s2=1.3, lengthscales=[0.5, 1.7, 0.9])],
+    ids=["rbf", "matern52", "rq", "ard"],
+)
+def test_input_derivatives_match_finite_differences_3d(kernel):
+    """Multi-dimensional inputs, where a mis-broadcast lengthscale or a swapped
+    axis is easy to write and invisible in 1D."""
+    X1 = RNG.uniform(-2, 2, size=(4, 3))
+    X2 = RNG.uniform(-2, 2, size=(6, 3))
+    analytic = kernel.dK_dX1(X1, X2)
+    assert analytic.shape == (4, 6, 3)
+    np.testing.assert_allclose(
+        analytic, finite_diff_dK_dX1(kernel, X1, X2), rtol=1e-5, atol=1e-7
+    )
+
+
+def test_input_derivative_vanishes_at_coincident_points_for_stationary_kernels():
+    """k(x, x) = k(0) is constant, so the derivative on the diagonal is zero --
+    the fact that lets the Kuu diagonal drop out of the Z-gradient rather than
+    having to be special-cased (Sec. 9.6)."""
+    X = RNG.uniform(-2, 2, size=(6, 2))
+    for kernel in (RBF(s2=1.2, l=0.8), Matern(nu=1.5, s2=1.0, l=1.1),
+                   ARD(s2=1.0, lengthscales=[0.7, 1.3])):
+        g = kernel.dK_dX1(X, X)
+        np.testing.assert_allclose(np.einsum("iia->ia", g), 0.0, atol=1e-14)
+
+
+def test_stationary_input_derivative_is_antisymmetric_in_its_arguments():
+    """For k(x, x') = f(x - x'), dk/dx = -dk/dx'. Checked by swapping the two
+    argument sets: dK_dX1(X2, X1) transposed must be the negative."""
+    X1 = RNG.uniform(-2, 2, size=(5, 2))
+    X2 = RNG.uniform(-2, 2, size=(4, 2))
+    for kernel in (RBF(s2=1.3, l=0.9), RationalQuadratic(s2=1.0, l=1.1, alpha=2.0)):
+        a = kernel.dK_dX1(X1, X2)                   # (5, 4, 2)
+        b = kernel.dK_dX1(X2, X1).transpose(1, 0, 2)  # (5, 4, 2)
+        np.testing.assert_allclose(a, -b, rtol=1e-12, atol=1e-14)
+
+
+def test_non_differentiable_kernels_refuse_rather_than_approximate():
+    """Matern nu=0.5 has a genuine cusp at r=0 and Gibbs simply has not been
+    derived. Both must raise: returning a large finite number for the OU cusp
+    would hand an optimizer a silently wrong direction."""
+    X1 = RNG.uniform(-2, 2, size=(4, 1))
+    X2 = RNG.uniform(-2, 2, size=(3, 1))
+    for kernel in (Matern(nu=0.5, s2=1.0, l=1.0), Gibbs(s2=1.0, a=0.0, b=0.3)):
+        with pytest.raises(NotImplementedError):
+            kernel.dK_dX1(X1, X2)
+    # and the refusal propagates through composition rather than being swallowed
+    with pytest.raises(NotImplementedError):
+        Sum(RBF(), Matern(nu=0.5)).dK_dX1(X1, X2)
