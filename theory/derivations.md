@@ -808,7 +808,7 @@ being bounded — it can only change how tight the bound is. Maximizing `F` over
 only improve the bound toward the same fixed ceiling. This is the structural
 difference from a model parameter, whose optimum trades data fit against a
 complexity penalty and can overfit; `Z` has nothing to trade. It is also the
-difference from FITC (Sec. 9.6), where `Z` *does* enter the model.
+difference from FITC (Sec. 9.7), where `Z` *does* enter the model.
 
 ### 9.3 Collapsing the bound
 
@@ -948,7 +948,159 @@ four decades moves both by a factor of ten per decade, with no floor — which i
 what an implementation with correct algebra and one loaded diagonal looks like,
 and what an algebra error would not.
 
-### 9.6 What is deliberately not here yet
+### 9.6 Gradients of the bound
+
+Everything the optimizer needs comes out of one contraction, and the point of
+doing it carefully is that the three gradients — kernel hyperparameters, noise,
+and the inducing locations `Z` — all fall out of the *same* two matrices. Write
+
+```
+W := Qff + sigma^2 I,     alpha := W^{-1} y,     T := tr(Kff - Qff),
+
+F = -n/2 log(2 pi) - 1/2 log|W| - 1/2 y^T W^{-1} y - T / (2 sigma^2).           (9.13)
+```
+
+Differentiating with the two standard identities `d log|W| = tr(W^{-1} dW)` and
+`d(W^{-1}) = -W^{-1} (dW) W^{-1}`:
+
+```
+dF = 1/2 tr[ (alpha alpha^T - W^{-1}) dW ] - 1/(2 sigma^2) tr(dKff - dQff)
+     + T / (2 sigma^4) d(sigma^2).                                              (9.14)
+```
+
+The last term is the `sigma^2` in the *denominator* of the trace penalty, and it
+is easy to lose. Now split by which quantity moved.
+
+**Kernel hyperparameters.** `sigma^2` is fixed, so `dW = dQff`, and (9.14)
+becomes `1/2 tr[H dQff] - 1/(2 sigma^2) tr(dKff)` with
+
+```
+H := alpha alpha^T - W^{-1} + sigma^{-2} I,                                     (9.15)
+```
+
+where the `+sigma^{-2} I` is precisely the `+1/(2 sigma^2) tr(dQff)` half of the
+trace penalty folded in. That is the whole trick: **the penalty term is not a
+separate gradient, it is a rank-correction to the one matrix `H` that everything
+contracts against**, plus a diagonal-only piece from `Kff`.
+
+Differentiating `Qff = Kfu Kuu^{-1} Kuf` with `P := Kuu^{-1} Kuf` (shape `M x n`)
+and `d(Kuu^{-1}) = -Kuu^{-1} dKuu Kuu^{-1}`:
+
+```
+dQff = (dKfu) P + P^T (dKuf) - P^T (dKuu) P.                                    (9.16)
+```
+
+The first two terms are transposes of each other and `H` is symmetric, so they
+contract identically. Setting
+
+```
+R := P H        (M x n),        S := P H P^T     (M x M),                       (9.17)
+```
+
+and writing `<A, B>` for the elementwise sum `sum_ij A_ij B_ij`, the whole
+hyperparameter gradient is
+
+```
+dF/dtheta = <R, dKuf/dtheta> - 1/2 <S, dKuu/dtheta>
+            - 1/(2 sigma^2) SUM_i d k(x_i, x_i)/dtheta.                         (9.18)
+```
+
+Three things to notice. `Kff` appears only through its *diagonal*, so the
+`O(n M)` memory of Sec. 9.5 survives differentiation — which is why
+`gp/sparse.py` has a blocked `kernel_grad_diag` rather than calling
+`kernel.grads(X)` and taking a diagonal. `dKuf/dtheta` is a *cross*-covariance
+gradient, `Z` against `X`: the exact GP never needs one, which is why
+`kernel.grads` had to grow a second argument. And `R` and `S` are computed once
+and reused for every parameter, so adding a hyperparameter costs one kernel
+gradient, not a refactorization.
+
+**Noise.** Here `dW = I d(sigma^2)` and `Kff`, `Qff` do not move, so from (9.14),
+in the log parameterization the repo uses everywhere (`d sigma^2 / d log sigma^2
+= sigma^2`):
+
+```
+dF/d(log sigma^2) = sigma^2 [ 1/2 ( alpha^T alpha - tr W^{-1} ) + T/(2 sigma^4) ]. (9.19)
+```
+
+The bracket's first half is exactly the exact-GP noise gradient of Sec. 2. The
+second half is new and it always *raises* the optimal noise: a sparse model that
+cannot explain `T` worth of function variation would rather call it noise. That
+is a real bias, not a bug, and it is the mechanism behind the FITC pathology
+Day 4 goes after — VFE pays for the shortfall in `sigma^2`, FITC hides it in the
+covariance instead.
+
+**Inducing locations.** `Z` enters `Kuu` and `Kuf` and *not* `Kff` — the
+statement of Sec. 9.2 that `Z` is variational, now visible as a missing term.
+Only row `m` of `Kuf` depends on `z_m`, while `Kuu` touches `z_m` twice (row and
+column). Writing `d1 k(a, b)` for the derivative in the first slot:
+
+```
+d Kuf / d z_ma has one nonzero row:  [d1 k(z_m, x_j)]_a
+d Kuu / d z_ma has a row and a column, giving
+    <S, dKuu/dz_ma> = 2 SUM_j S_mj [d1 k(z_m, z_j)]_a     (S symmetric, k symmetric)
+```
+
+so the factor of `1/2` in (9.18) cancels and
+
+```
+dF/dz_ma = SUM_j R_mj [d1 k(z_m, x_j)]_a  -  SUM_j S_mj [d1 k(z_m, z_j)]_a.     (9.20)
+```
+
+Two forces, and the sign structure is the content: the first pulls `z_m` toward
+data the current inducing set explains badly, the second pushes it away from the
+other inducing points. The `j = m` term of the second sum is *not* a special
+case — `k(z_m, z_m)` is constant for a stationary kernel, so `d1 k(z_m, z_m) = 0`
+and the diagonal drops out on its own. (`tests/test_kernels.py::
+test_input_derivative_vanishes_at_coincident_points_for_stationary_kernels`
+checks that rather than assuming it.)
+
+**Computing `R` and `S` without an `n x n`.** `H` in (9.15) is `n x n` and must
+never be formed. With the Sec. 9.5 factors `A = Luu^{-1} Kuf`, `B = I + sigma^{-2}
+A A^T`, and Woodbury, two simplifications do all the work:
+
+```
+A W^{-1} = sigma^{-2} B^{-1} A          [ since A A^T / sigma^2 = B - I ]
+P        = Luu^{-T} A
+alpha    = ( y - A^T L_B^{-T} c ) / sigma^2
+```
+
+so `R = Luu^{-T} [ (A alpha) alpha^T + sigma^{-2} (A - B^{-1}A) ]` and `S = R P^T`,
+both `O(n M^2)` with nothing larger than `M x n` alive. `tr W^{-1}` for (9.19) is
+`(n - sigma^{-2} <A, B^{-1}A>) / sigma^2` by the same identity.
+
+**Where the jitter goes, and why it is not negligible.** Sec. 9.5 loads
+`Kuu -> Kuu + j * mean(diag Kuu) I`, and that loading is itself a function of
+`theta` (through `s2`), so the honest `dKuu/dtheta` carries
+`+ j * mean(diag dKuu) I`. The tempting argument for dropping it — `j` is
+`1e-10`, so who cares — is wrong, and it is worth seeing why, because the same
+trap appears anywhere a regularizer is differentiated.
+
+The term does not enter the gradient on its own. It enters contracted against
+`S = P H P^T`, and `P = Kuu^{-1} Kuf` carries an inverse, so the omitted
+contribution scales like `j * ||P||^2` — with the *square* of `Kuu`'s
+conditioning, not with `j` alone. It was found the way such things should be
+found: a finite-difference check that RBF passed and Periodic failed, at seven
+inducing points that a period-2 kernel sees as near-duplicates
+(`cond(Kuu) ~ 6e4`). The log-`s2` gradient came out `1.3e-4` relative off — five
+orders of magnitude larger than `j`, and flat in `eps`, which is the signature
+of a real error rather than of finite-difference truncation (truncation shrinks
+and then grows again as `eps` falls; this did neither).
+
+Including the term is one line and makes the reported gradient exact for the
+objective actually being optimized. The `Z` block needs no analogous correction,
+but only for a reason worth naming: every kernel here that *has* an input
+derivative is stationary, so `mean(diag Kuu)` does not depend on `Z` at all. A
+non-stationary kernel with a `dK_dX1` would need it.
+
+**The check.** `tests/test_sparse.py` central-differences all three blocks —
+hyperparameters, `log sigma^2`, and every coordinate of `Z` at three random
+inducing sets each, for RBF, both differentiable Materns, RQ, Periodic, a sum
+and a product in 1D, and for RBF and ARD in 2D. The
+`Z` block is the one that is easy to get subtly wrong (drop the factor of 2 on
+the `Kuu` term and the bound still increases, just toward the wrong place), so
+it is checked at random `Z` rather than at a single convenient configuration.
+
+### 9.7 What is deliberately not here yet
 
 - **FITC** (Snelson & Ghahramani 2006) keeps the diagonal of `Kff - Qff`
   inside the covariance instead of penalizing it: `Qff + diag(Kff - Qff) +
@@ -957,9 +1109,12 @@ and what an algebra error would not.
 - **SVGP** (Hensman et al. 2013) keeps `q(u)` uncollapsed so the bound
   decomposes over data points and can be minibatched, and admits non-Gaussian
   likelihoods. The collapsed bound (9.8) cannot: it needs all of `y` at once.
-- Gradients of (9.8) — including with respect to `Z`, which is the part that is
-  easy to get subtly wrong. Until they exist, `Z` is whatever the caller
-  chooses, and ML-II over the sparse bound is not available.
+- ML-II over (9.18)–(9.20). The gradients exist and are checked; *driving* them
+  — joint optimization of hyperparameters and `Z`, and what the learned `Z`
+  actually look like — is the next piece.
+- Non-stationary and cusped kernels. `Gibbs` has no input-space derivative
+  derived here and `Matern nu=0.5` has none to derive, so (9.20) does not apply
+  to either; both raise rather than return something plausible.
 
 ---
 
@@ -1346,10 +1501,10 @@ consequence.
   Approximate Gaussian Process Regression," *JMLR* 2005. (SoR/DTC/FITC as
   different effective priors; `Qff` and the Nystrom view, Sec. 9.3.)
 - E. Snelson and Z. Ghahramani, "Sparse Gaussian Processes using Pseudo-inputs,"
-  *NeurIPS* 2006. (FITC, Sec. 9.6.)
+  *NeurIPS* 2006. (FITC, Sec. 9.7.)
 - M. Bauer, M. van der Wilk, and C. E. Rasmussen, "Understanding Probabilistic
   Sparse Gaussian Process Approximations," *NeurIPS* 2016. (What VFE and FITC
   each do to the fitted noise and the predictive variance — the Day 4
   comparison.)
 - J. Hensman, N. Fusi, and N. D. Lawrence, "Gaussian Processes for Big Data,"
-  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.6.)
+  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.7.)
