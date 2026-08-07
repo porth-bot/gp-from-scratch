@@ -12,8 +12,8 @@ import numpy as np
 import pytest
 
 from gp.gp import GPRegressor
-from gp.kernels import ARD, RBF, Gibbs, Matern, Periodic
-from gp.sparse import SGPR, kernel_diag
+from gp.kernels import ARD, RBF, Gibbs, Matern, Periodic, RationalQuadratic
+from gp.sparse import SGPR, kernel_diag, kernel_grad_diag
 
 
 def _toy(rng, n=40, lo=-3.0, hi=3.0):
@@ -278,3 +278,277 @@ def test_constructor_and_fit_validate_their_arguments():
         SGPR(RBF(), Z=np.zeros((3, 1)), noise_var=0.05, jitter=-1.0)
     with pytest.raises(ValueError):
         SGPR(RBF(), Z=np.zeros((3, 2)), noise_var=0.05).fit(X, y)   # wrong d
+
+
+# -- gradients of the bound --------------------------------------------------
+#
+# Three blocks (kernel theta, log sigma^2, Z) all contract against the same two
+# matrices (Sec. 9.6), so a mistake in the shared part shows up everywhere and a
+# mistake in the per-block algebra shows up in exactly one. The Z block is the
+# one with no independent oracle -- nothing else in the repo differentiates a
+# bound with respect to a *location* -- so it gets the most checking.
+
+GRAD_KERNELS = [
+    lambda: RBF(s2=1.3, l=0.8),
+    lambda: Matern(nu=1.5, s2=0.9, l=1.1),
+    lambda: Matern(nu=2.5, s2=0.9, l=1.1),
+    lambda: RationalQuadratic(s2=1.0, l=0.9, alpha=2.0),
+    lambda: Periodic(s2=1.1, l=0.9, p=2.0),
+    lambda: RBF(s2=0.8, l=1.2) + Periodic(s2=0.4, l=1.0, p=2.5),
+    lambda: RBF(s2=0.9, l=1.4) * Periodic(s2=1.0, l=1.2, p=3.0),
+]
+GRAD_IDS = ["rbf", "matern32", "matern52", "rq", "periodic", "sum", "product"]
+
+# eps = 1e-5 rather than the 1e-6 the kernel tests use. The bound is a sum over
+# n data points, so its curvature is n times a kernel entry's and the optimal
+# central-difference step shifts up accordingly; at 1e-6 the Periodic case is
+# dominated by cancellation, not by the gradient being wrong (measured: the
+# error bottoms out near 1e-4 and grows again below it, the textbook V).
+FD_EPS = 1e-5
+
+
+def _fd_param_grads(model, X, y, eps=FD_EPS):
+    p0 = model.params.copy()
+    out = []
+    for i in range(len(p0)):
+        bumped = []
+        for sign in (+1, -1):
+            p = p0.copy()
+            p[i] += sign * eps
+            model.params = p
+            bumped.append(model.fit(X, y).elbo())
+        out.append((bumped[0] - bumped[1]) / (2 * eps))
+    model.params = p0
+    model.fit(X, y)
+    return np.array(out)
+
+
+def _fd_Z_grads(model, X, y, eps=FD_EPS):
+    Z0 = model.Z.copy()
+    out = np.zeros_like(Z0)
+    for i in range(Z0.shape[0]):
+        for a in range(Z0.shape[1]):
+            bumped = []
+            for sign in (+1, -1):
+                Zp = Z0.copy()
+                Zp[i, a] += sign * eps
+                model.Z = Zp
+                bumped.append(model.fit(X, y).elbo())
+            out[i, a] = (bumped[0] - bumped[1]) / (2 * eps)
+    model.Z = Z0
+    model.fit(X, y)
+    return out
+
+
+@pytest.mark.parametrize("make_kernel", GRAD_KERNELS, ids=GRAD_IDS)
+def test_bound_gradients_match_finite_differences(make_kernel):
+    """Hyperparameters and log sigma^2, against central differences."""
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng, n=60)
+    Z = rng.uniform(-3, 3, 7).reshape(-1, 1)
+    model = SGPR(make_kernel(), Z=Z, noise_var=0.07).fit(X, y)
+
+    _, analytic, _ = model.elbo_and_grads()
+    numeric = _fd_param_grads(model, X, y)
+    assert analytic.shape == numeric.shape
+    np.testing.assert_allclose(analytic, numeric, rtol=2e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("make_kernel", GRAD_KERNELS, ids=GRAD_IDS)
+@pytest.mark.parametrize("seed", [1, 2, 3], ids=["Z1", "Z2", "Z3"])
+def test_inducing_location_gradients_match_finite_differences(make_kernel, seed):
+    """dF/dZ at several *random* inducing sets, not one convenient one.
+
+    The failure this guards against is quantitative, not qualitative: drop the
+    factor of 2 on the Kuu term of (9.20) and the bound still increases along
+    the reported direction, just toward the wrong place. Only a numerical check
+    at arbitrary Z catches that.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng, n=60)
+    Z = np.random.default_rng(seed).uniform(-3.5, 3.5, 8).reshape(-1, 1)
+    model = SGPR(make_kernel(), Z=Z, noise_var=0.07).fit(X, y)
+
+    _, _, analytic = model.elbo_and_grads()
+    numeric = _fd_Z_grads(model, X, y)
+    assert analytic.shape == Z.shape
+    scale = max(np.abs(numeric).max(), 1.0)
+    assert np.abs(analytic - numeric).max() < 1e-4 * scale, (analytic, numeric)
+
+
+def test_gradient_survives_an_ill_conditioned_kuu():
+    """The regression test for the jitter term in the Kuu gradient.
+
+    fit() factorizes Kuu + j*mean(diag Kuu)*I, so the loading is a function of
+    s2 and has to be differentiated too. Skipping it looks free -- j is 1e-10 --
+    but the term is contracted against S = P H P^T, and P carries a Kuu^{-1},
+    so the error scales like j * ||P||^2, i.e. with the SQUARE of Kuu's
+    conditioning. Here a period-2 kernel sees inducing points 2 apart as
+    duplicates; cond(Kuu) is only ~6e4 and the omission was still worth 1.3e-4
+    relative on the log-s2 gradient, flat in eps (so: a real error, not
+    finite-difference truncation, which would have shrunk and then grown).
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng, n=60)
+    Z = rng.uniform(-3, 3, 7).reshape(-1, 1)
+    kernel = Periodic(s2=1.1, l=0.9, p=2.0)
+    assert np.linalg.cond(kernel(Z, Z)) > 1e4          # the setup, not luck
+
+    model = SGPR(kernel, Z=Z, noise_var=0.07).fit(X, y)
+    _, analytic = model.elbo_grad_params()
+    numeric = _fd_param_grads(model, X, y)
+    # 1e-4 relative would pass a sloppy tolerance; 2e-5 is what correctness costs
+    np.testing.assert_allclose(analytic, numeric, rtol=2e-5, atol=1e-6)
+
+
+def test_gradients_match_finite_differences_in_two_dimensions():
+    """Multi-dimensional Z, where a swapped axis in the (M, n, d) contraction
+    is easy to write and invisible in 1D. ARD as well, since its input
+    derivative is the one that is not a function of the plain r^2."""
+    rng = np.random.default_rng(11)
+    X = rng.uniform(-2, 2, size=(70, 2))
+    y = np.sin(X[:, 0]) * np.cos(1.5 * X[:, 1]) + 0.1 * rng.standard_normal(70)
+    Z = rng.uniform(-2, 2, size=(6, 2))
+
+    for kernel in (ARD(s2=1.2, lengthscales=[0.7, 1.4]), RBF(s2=1.1, l=0.9)):
+        model = SGPR(kernel, Z=Z, noise_var=0.05).fit(X, y)
+        _, gp_analytic, gz_analytic = model.elbo_and_grads()
+        np.testing.assert_allclose(
+            gp_analytic, _fd_param_grads(model, X, y), rtol=2e-5, atol=1e-6
+        )
+        gz_numeric = _fd_Z_grads(model, X, y)
+        scale = max(np.abs(gz_numeric).max(), 1.0)
+        assert np.abs(gz_analytic - gz_numeric).max() < 1e-4 * scale
+
+
+# -- the two structural checks the gradients have to pass --------------------
+
+
+def test_at_z_equals_x_the_parameter_gradient_is_the_exact_gp_gradient():
+    """The Sec. 9.4 recovery argument, differentiated.
+
+    At Z = X the bound *is* the exact log marginal likelihood, identically in
+    theta and sigma^2 -- so its gradient must be the exact GP's gradient, term
+    for term. This pins the sparse gradient to gp.py's, which is itself
+    finite-difference-checked and cross-checked against scikit-learn: a shared
+    error would have to survive two independent derivations to get through.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    for make in (lambda: RBF(s2=1.2, l=0.9), lambda: Matern(nu=2.5, s2=0.8, l=1.1)):
+        exact = GPRegressor(make(), noise_var=0.05)
+        _, exact_grad = exact.lml_and_grad(X, y)
+        _, sparse_grad = SGPR(make(), Z=X, noise_var=0.05).fit(X, y).elbo_grad_params()
+        np.testing.assert_allclose(sparse_grad, exact_grad, rtol=1e-6, atol=1e-7)
+
+
+def test_the_z_gradient_vanishes_at_z_equals_x():
+    """Z = X is a global maximum of F over Z: F <= log p(y) for every inducing
+    set (test_bound_never_exceeds_the_exact_log_evidence) with equality there,
+    so the gradient has to be zero. Not a numerical accident -- it is the same
+    statement as exact recovery, seen one derivative up. What is left is the
+    jitter, which is why the tolerance is 1e-5 rather than 1e-14.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    for make in (lambda: RBF(s2=1.2, l=0.9), lambda: Matern(nu=2.5, s2=0.8, l=1.1)):
+        _, params_grad, grad_Z = SGPR(make(), Z=X, noise_var=0.05).fit(X, y).elbo_and_grads()
+        # against the parameter gradient's scale, which is O(10) here
+        assert np.abs(grad_Z).max() < 1e-5 * np.abs(params_grad).max()
+
+
+def test_the_noise_gradient_carries_the_trace_penalty_term():
+    """(9.19) has a term the exact GP's noise gradient does not: +T/(2 sigma^4),
+    which is positive whenever the inducing set is imperfect. So at a shared
+    (theta, sigma^2) a sparse model always wants MORE noise than the exact one
+    -- variation u cannot explain is cheaper to call noise. Measured rather
+    than asserted: the difference must be exactly the trace term's derivative.
+    """
+    rng = np.random.default_rng(7)
+    X, y = _toy(rng, n=100, lo=-4, hi=4)
+    exact = GPRegressor(RBF(s2=1.0, l=0.6), noise_var=0.04)
+    _, exact_grad = exact.lml_and_grad(X, y)
+    sparse = SGPR(RBF(s2=1.0, l=0.6), Z=np.linspace(-4, 4, 6).reshape(-1, 1),
+                  noise_var=0.04).fit(X, y)
+    _, sparse_grad = sparse.elbo_grad_params()
+
+    assert sparse.trace_term() > 0.0
+    assert sparse_grad[-1] > exact_grad[-1]        # the sparse fit wants more noise
+
+
+def test_a_step_along_the_gradient_raises_the_bound():
+    """The behavioral consequence: ascent works. Small enough steps in theta
+    and in Z must both increase F, and Z must actually move (a zero gradient
+    would pass a monotonicity check vacuously)."""
+    rng = np.random.default_rng(4)
+    X, y = _toy(rng, n=80, lo=-4, hi=4)
+    model = SGPR(RBF(s2=1.0, l=0.5), Z=rng.uniform(-4, 4, 6).reshape(-1, 1),
+                 noise_var=0.05).fit(X, y)
+    before, grad_params, grad_Z = model.elbo_and_grads()
+    assert np.abs(grad_Z).max() > 1e-3
+
+    model.Z = model.Z + 1e-4 * grad_Z / np.abs(grad_Z).max()
+    assert model.fit(X, y).elbo() > before
+
+    model.params = model.params + 1e-5 * grad_params / np.abs(grad_params).max()
+    assert model.fit(X, y).elbo() > before
+
+
+# -- what the gradients decline to do ----------------------------------------
+
+
+def test_z_gradients_refuse_for_kernels_with_no_input_derivative():
+    """Matern nu=0.5 (a real cusp at r=0) and Gibbs (non-stationary, not
+    derived) have no dF/dZ, and must say so rather than return a number. The
+    parameter gradient is unaffected -- only the Z block needs an input
+    derivative -- and that separation is the reason elbo_grad_params exists.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    Z = np.linspace(-3, 3, 6).reshape(-1, 1)
+    for kernel in (Matern(nu=0.5, s2=1.0, l=1.0), Gibbs(s2=1.0, a=0.0, b=0.3)):
+        model = SGPR(kernel, Z=Z, noise_var=0.05).fit(X, y)
+        with pytest.raises(NotImplementedError):
+            model.elbo_and_grads()
+        _, grad = model.elbo_grad_params()             # still fine
+        np.testing.assert_allclose(grad, _fd_param_grads(model, X, y),
+                                   rtol=2e-5, atol=1e-6)
+
+
+def test_setting_Z_copies_validates_and_invalidates_the_fit():
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    model = SGPR(RBF(), Z=np.linspace(-3, 3, 5).reshape(-1, 1),
+                 noise_var=0.05).fit(X, y)
+    new = np.linspace(-2, 2, 5).reshape(-1, 1)
+    model.Z = new
+    with pytest.raises(AssertionError):
+        model.elbo()                                   # must refit first
+    model.fit(X, y)
+    new[:] = 99.0
+    assert model.Z.max() < 99.0                        # copied, not aliased
+    with pytest.raises(ValueError):
+        model.Z = np.linspace(-2, 2, 4).reshape(-1, 1)  # wrong M
+
+
+def test_kernel_grad_diag_matches_the_full_matrix_for_every_kernel_shape():
+    """The blocked gradient diagonal, the same discipline as kernel_diag: it
+    has to agree with the n^2 spelling for non-stationary kernels and
+    composites, and at block sizes that do not divide n."""
+    rng = np.random.default_rng(12)
+    X1 = np.linspace(-2, 2, 101).reshape(-1, 1)
+    X2 = rng.uniform(-2, 2, size=(101, 3))
+    cases = [
+        (RBF(s2=1.7, l=0.4), X1),
+        (Gibbs(s2=1.1, a=0.5, b=0.3), X1),                    # non-stationary
+        (RBF(s2=1.0, l=1.0) + Periodic(s2=0.5, l=1.0, p=2.0), X1),
+        (RBF(s2=0.3, l=2.0) * Periodic(s2=2.0, l=0.8, p=1.0), X1),
+        (ARD(s2=1.4, lengthscales=np.array([0.5, 1.0, 2.0])), X2),
+    ]
+    for kernel, X in cases:
+        reference = [np.diag(g) for g in kernel.grads(X)]
+        for block in (1, 7, 100, 101, 4096):
+            blocked = kernel_grad_diag(kernel, X, block=block)
+            assert len(blocked) == len(reference)
+            for a, b in zip(blocked, reference):
+                np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-14)
