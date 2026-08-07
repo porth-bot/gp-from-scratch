@@ -9,6 +9,11 @@ hand-tuned per-parameter learning rate. Why not (L-)BFGS: it would work
 different initializations are the standard mitigation (used in the
 experiments where it matters).
 
+The same machinery drives the sparse bound (:func:`maximize_elbo`), where the
+per-coordinate normalization earns its keep a second time: there the vector
+being ascended concatenates log-hyperparameters with *raw input coordinates*
+Z, two blocks with no reason to share a step size.
+
 Adam (Kingma & Ba 2015), ascent form:
 
     m_t = b1 m_{t-1} + (1-b1) g_t          (first-moment EMA)
@@ -230,4 +235,158 @@ def maximize_lml_multistart(
         lmls=lmls,
         inits=np.array(inits),
         best_restart=best_restart,
+    )
+
+
+@dataclass
+class SGPRFitResult:
+    """Outcome of :func:`maximize_elbo`.
+
+    Attributes
+    ----------
+    params : the log-space hyperparameters found (already set on the model).
+    Z : the inducing locations found -- the model's own ``Z`` if they were
+        held fixed.
+    elbo : the variational bound at ``(params, Z)``, i.e. the best value seen.
+    history : the bound at every step, in step order.
+    trace_term : ``tr(Kff - Qff)`` at the returned fit. Reported because it is
+        the honest read-out of how much of f the inducing set still fails to
+        explain, and it is the term that ``Z`` is doing most of its work on.
+    """
+
+    params: np.ndarray
+    Z: np.ndarray
+    elbo: float
+    history: "list[float]"
+    trace_term: float
+
+
+def maximize_elbo(
+    model: Any,
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    optimize_Z: bool = True,
+    lr: float = 0.05,
+    steps: int = 300,
+    callback: Optional[Callback] = None,
+) -> SGPRFitResult:
+    """Joint ML-II on the Titsias bound: hyperparameters *and* inducing inputs.
+
+    Ascends ``model.elbo_and_grads`` over the concatenation of the log-space
+    hyperparameters and the flattened inducing locations, then leaves the model
+    fit at the best iterate seen. With ``optimize_Z=False`` only the
+    hyperparameter block moves and ``model.elbo_grad_params`` is used instead,
+    which is what makes this work for kernels with no input-space derivative
+    (Matern nu=1/2, Gibbs) and what the experiments use as the frozen-Z control.
+
+    Two things are worth being explicit about, because they are the reason this
+    is one optimizer and not two.
+
+    **Mixing the blocks is safe here, and it is Adam that makes it safe.** The
+    hyperparameter block lives in log space, where a step of 0.05 is a 5%
+    change; the Z block lives in the raw input space, where 0.05 means whatever
+    the units of x mean. A shared raw step size would be indefensible. Adam
+    divides each coordinate by its own gradient RMS, so ``lr`` sets a step in
+    units of *that coordinate's own gradient scale*, and the two blocks stop
+    needing to be commensurable.
+
+    **Optimizing Z cannot overfit the way optimizing theta can.** Z is a
+    variational parameter: it enters q and not the model, so log p(y | theta)
+    does not depend on it (Sec. 9.2). Moving Z can only tighten a bound on a
+    quantity it cannot itself move, and F <= log p(y | theta) holds at every Z.
+    That is a testable invariant rather than a slogan, and
+    ``tests/test_sparse.py`` tests it: after this function has driven Z as far
+    as it will go, the bound is still below the exact GP's log evidence *at the
+    same hyperparameters*. The contrast is FITC, where Z do enter the model and
+    the corresponding quantity is not a bound at all.
+
+    Multi-start is not wired in here the way it is for the exact GP. The bound
+    is multimodal in Z (permutations of the inducing set alone give M! copies
+    of every optimum), but those modes are equivalent, and the practical
+    initialization -- spread Z over the data, e.g. at its quantiles -- is good
+    enough that the experiments do not need restarts. Call this function
+    several times from different inits if a particular problem does.
+
+    Parameters
+    ----------
+    model : an ``SGPR`` (anything exposing ``params``, ``Z``, ``fit``,
+        ``elbo_and_grads`` and ``elbo_grad_params``).
+    optimize_Z : whether the inducing locations move.
+    lr, steps : passed to :func:`adam_maximize`.
+    callback : ``(step, packed_theta, value)``, as for :func:`adam_maximize`.
+
+    Returns
+    -------
+    SGPRFitResult -- see that class. The model is left fit at the winner.
+
+    Raises
+    ------
+    numpy.linalg.LinAlgError
+        If the ascent wanders somewhere ``Kuu`` or ``B`` is not
+        positive-definite. Deliberately not caught: unlike the multi-start
+        case, where a dead restart is one sample out of eight, here it is the
+        whole fit, and silently returning the initialization would look like
+        success.
+
+    Examples
+    --------
+    Ten inducing points, initialized on a coarse grid, on data from a
+    lengthscale the model does not start anywhere near. Both blocks move, the
+    bound climbs, and it stays under the exact log evidence at the recovered
+    hyperparameters -- which is the invariant, not an accident of this seed.
+
+    >>> import numpy as np
+    >>> from gp.gp import GPRegressor
+    >>> from gp.kernels import RBF
+    >>> from gp.sparse import SGPR
+    >>> rng = np.random.default_rng(0)
+    >>> X = np.sort(rng.uniform(-4, 4, 400)).reshape(-1, 1)
+    >>> y = np.sin(1.5 * X).ravel() + 0.1 * rng.standard_normal(400)
+    >>> model = SGPR(RBF(s2=0.4, l=2.5), Z=np.linspace(-4, 4, 10).reshape(-1, 1),
+    ...              noise_var=0.3)
+    >>> res = maximize_elbo(model, X, y, lr=0.05, steps=400)
+    >>> bool(res.elbo > res.history[0])                 # it climbed
+    True
+    >>> bool(np.abs(res.Z - np.linspace(-4, 4, 10).reshape(-1, 1)).max() > 0.05)
+    True
+    >>> exact = GPRegressor(RBF(), noise_var=1.0)
+    >>> exact.params = res.params
+    >>> bool(res.elbo <= exact.fit(X, y).log_marginal_likelihood())
+    True
+    """
+    n_params = int(np.asarray(model.params).size)
+    Z_shape = np.asarray(model.Z).shape
+
+    def value_and_grad(vec: np.ndarray) -> "tuple[float, np.ndarray]":
+        model.params = vec[:n_params]
+        if optimize_Z:
+            model.Z = vec[n_params:].reshape(Z_shape)
+        model.fit(X, y)
+        if not optimize_Z:
+            return model.elbo_grad_params()
+        value, grad_params, grad_Z = model.elbo_and_grads()
+        return value, np.concatenate([grad_params, grad_Z.ravel()])
+
+    theta0 = np.asarray(model.params, dtype=float).copy()
+    if optimize_Z:
+        theta0 = np.concatenate([theta0, np.asarray(model.Z, dtype=float).ravel()])
+
+    best, history = adam_maximize(
+        value_and_grad, theta0, lr=lr, steps=steps, callback=callback
+    )
+
+    # Leave the model at the winner, not at wherever the last step landed --
+    # adam_maximize returns the best iterate, and a fixed-step run's final
+    # iterate routinely is not it.
+    model.params = best[:n_params]
+    if optimize_Z:
+        model.Z = best[n_params:].reshape(Z_shape)
+    model.fit(X, y)
+    return SGPRFitResult(
+        params=np.asarray(model.params, dtype=float).copy(),
+        Z=np.asarray(model.Z, dtype=float).copy(),
+        elbo=float(model.elbo()),
+        history=history,
+        trace_term=float(model.trace_term()),
     )

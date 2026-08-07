@@ -13,6 +13,7 @@ import pytest
 
 from gp.gp import GPRegressor
 from gp.kernels import ARD, RBF, Gibbs, Matern, Periodic, RationalQuadratic
+from gp.optimize import adam_maximize, maximize_elbo
 from gp.sparse import SGPR, kernel_diag, kernel_grad_diag
 
 
@@ -552,3 +553,193 @@ def test_kernel_grad_diag_matches_the_full_matrix_for_every_kernel_shape():
             assert len(blocked) == len(reference)
             for a, b in zip(blocked, reference):
                 np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-14)
+
+
+# -- joint ML-II over hyperparameters and inducing locations -----------------
+
+
+def _packed_toy(rng, n=200):
+    """A mixed-scale 1D target: slow on the left, fast on the right.
+
+    One stationary lengthscale cannot be right everywhere on this, which is
+    what makes *where* the inducing points go a question with an answer.
+    """
+    X = np.sort(rng.uniform(-4.0, 4.0, n)).reshape(-1, 1)
+    x = X[:, 0]
+    f = np.sin(1.1 * x) + 0.6 * np.sin(5.0 * x) * (x > 0)
+    return X, f + 0.1 * rng.standard_normal(n)
+
+
+def test_joint_ml2_climbs_and_the_bound_stays_below_the_exact_evidence():
+    """The invariant that licenses optimizing Z at all (Sec. 9.2).
+
+    F(theta, Z) <= log p(y | theta) for *every* Z, so however hard the
+    optimizer drives the inducing locations, the bound cannot cross the exact
+    log evidence at the hyperparameters it ended up at. The comparison has to
+    be at the SGPR's own theta -- against the exact GP's ML-II optimum it would
+    hold for a second, weaker reason and would not test this.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _packed_toy(rng)
+    model = SGPR(RBF(s2=0.5, l=2.0), Z=np.linspace(-4, 4, 12).reshape(-1, 1),
+                 noise_var=0.3)
+    res = maximize_elbo(model, X, y, lr=0.05, steps=400)
+
+    assert res.elbo > res.history[0] + 1.0             # it actually climbed
+    assert res.elbo == max(res.history)                # and returns the best
+
+    exact = GPRegressor(RBF(), noise_var=1.0)
+    exact.params = res.params
+    assert res.elbo <= exact.fit(X, y).log_marginal_likelihood()
+
+
+def test_optimizing_Z_cannot_move_the_quantity_being_bounded():
+    """The structural difference from a model parameter, made measurable.
+
+    At fixed theta, moving Z changes the bound (that is the point) but leaves
+    log p(y | theta) untouched to the last bit, because Z never enters the
+    model. A parameter that could do both would be one that could overfit.
+    """
+    rng = np.random.default_rng(1)
+    X, y = _packed_toy(rng)
+    kernel = RBF(s2=1.0, l=0.6)
+    exact = GPRegressor(kernel, noise_var=0.05).fit(X, y)
+    reference = exact.log_marginal_likelihood()
+
+    bounds = []
+    for Z in (np.linspace(-4, 4, 8).reshape(-1, 1),
+              np.linspace(-1, 1, 8).reshape(-1, 1),
+              rng.uniform(-4, 4, 8).reshape(-1, 1)):
+        model = SGPR(RBF(s2=1.0, l=0.6), Z=Z, noise_var=0.05).fit(X, y)
+        bounds.append(model.elbo())
+        # the exact GP is re-fit at the same theta and must not have noticed
+        assert exact.fit(X, y).log_marginal_likelihood() == reference
+
+    assert max(bounds) - min(bounds) > 1.0             # Z did move the bound
+    assert max(bounds) < reference
+
+
+def test_freeing_the_inducing_locations_beats_freezing_them():
+    """What the Z block buys, at matched M, matched init and matched budget.
+
+    Both runs start from the same evenly-spaced Z and take the same number of
+    Adam steps; the only difference is whether dF/dZ is followed. If the extra
+    block did not pay for itself there would be no reason to have derived it.
+
+    On this target the mechanism is visible in the recovered lengthscale. Ten
+    evenly-spaced inducing points are 0.89 apart, and the right half of the
+    signal oscillates with period 1.26, so a frozen grid cannot represent it:
+    ML-II with Z pinned is driven to a long lengthscale (measured 1.26, against
+    the exact GP's 0.46) and calls the wiggles noise. Freeing Z lets the
+    inducing set migrate right -- 6 of 10 end up in the fast half -- and the
+    lengthscale lands near the exact fit's.
+
+    Note what is deliberately *not* asserted: that the free run has the smaller
+    trace penalty. It does not, by a factor of 150 here, and the assertion
+    failed the first time it was written. tr(Kff - Qff) is measured in units of
+    the fitted prior variance, so it is only comparable between fits sharing
+    theta; the frozen run buys a tiny trace by fitting a smooth, low-amplitude
+    model that has little left to explain. The bound is the comparable
+    quantity, because it is a bound on the same log p(y) either way.
+    """
+    rng = np.random.default_rng(2)
+    X, y = _packed_toy(rng)
+    Z0 = np.linspace(-4, 4, 10).reshape(-1, 1)
+    Xs = _grid(300, -4, 4)
+
+    exact = GPRegressor(RBF(s2=0.5, l=2.0), noise_var=0.3)
+    best, _ = adam_maximize(lambda p: exact.lml_and_grad(X, y, p), exact.params,
+                            lr=0.05, steps=600)
+    exact.params = best
+    mean_exact, _ = exact.fit(X, y).predict(Xs)
+
+    fits = {}
+    for optimize_Z in (False, True):
+        model = SGPR(RBF(s2=0.5, l=2.0), Z=Z0, noise_var=0.3)
+        res = maximize_elbo(model, X, y, optimize_Z=optimize_Z, lr=0.05, steps=400)
+        mean, _ = model.predict(Xs)
+        fits[optimize_Z] = (res, float(np.abs(mean - mean_exact).max()))
+    (frozen, frozen_err), (free, free_err) = fits[False], fits[True]
+
+    assert free.elbo > frozen.elbo + 10.0
+    assert free_err < 0.5 * frozen_err                 # and predicts better
+    np.testing.assert_array_equal(frozen.Z, Z0)        # frozen means frozen
+
+    # the lengthscale the frozen grid cannot afford, and where Z went to buy it
+    exact_l, frozen_l, free_l = (np.exp(p[1]) for p in
+                                 (exact.params, frozen.params, free.params))
+    assert frozen_l > 2.0 * exact_l
+    assert abs(free_l - exact_l) < 0.5 * abs(frozen_l - exact_l)
+    assert (free.Z > 0).sum() > (Z0 > 0).sum()         # migrated to the fast half
+
+
+def test_frozen_Z_works_for_kernels_with_no_input_derivative():
+    """``optimize_Z=False`` must route through ``elbo_grad_params``, which is
+    the only reason the two entry points are separate: Matern nu=1/2 and Gibbs
+    have no dF/dZ and would raise if the joint path were taken anyway."""
+    rng = np.random.default_rng(3)
+    X, y = _packed_toy(rng, n=120)
+    for kernel in (Matern(nu=0.5, s2=0.5, l=2.0), Gibbs(s2=0.5, a=0.0, b=0.5)):
+        model = SGPR(kernel, Z=np.linspace(-4, 4, 10).reshape(-1, 1),
+                     noise_var=0.3)
+        res = maximize_elbo(model, X, y, optimize_Z=False, lr=0.05, steps=150)
+        assert res.elbo > res.history[0]
+        with pytest.raises(NotImplementedError):
+            maximize_elbo(model, X, y, optimize_Z=True, steps=1)
+
+
+def test_maximize_elbo_leaves_the_model_at_the_returned_fit():
+    """The model is conditioned at the winner, not at the last iterate -- so a
+    caller can predict straight after optimizing without refitting."""
+    rng = np.random.default_rng(4)
+    X, y = _packed_toy(rng, n=120)
+    model = SGPR(RBF(s2=0.5, l=2.0), Z=np.linspace(-4, 4, 10).reshape(-1, 1),
+                 noise_var=0.3)
+    res = maximize_elbo(model, X, y, lr=0.05, steps=200)
+
+    np.testing.assert_array_equal(model.params, res.params)
+    np.testing.assert_array_equal(model.Z, res.Z)
+    assert model.elbo() == res.elbo
+    assert model.trace_term() == res.trace_term
+    model.predict(_grid())                             # fitted, no refit needed
+
+
+def test_optimized_inducing_points_converge_to_the_exact_posterior_in_M():
+    """The week's measurement in miniature: at the exact GP's own
+    hyperparameters, sweeping M with Z optimized must drive the bound up toward
+    the exact log evidence and the posterior error down toward zero.
+
+    Hyperparameters are held at the exact fit's so that the only thing varying
+    is the approximation. ``experiments/sparse.py`` runs the full version,
+    where theta is free too.
+    """
+    rng = np.random.default_rng(5)
+    X, y = _packed_toy(rng, n=300)
+    Xs = _grid(120, -4, 4)
+
+    exact = GPRegressor(RBF(s2=1.0, l=0.5), noise_var=0.02).fit(X, y)
+    reference = exact.log_marginal_likelihood()
+    mean_exact, var_exact = exact.predict(Xs)
+
+    bounds, mean_errs, sd_errs = [], [], []
+    for M in (4, 16, 64):
+        model = SGPR(RBF(s2=1.0, l=0.5),
+                     Z=np.quantile(X[:, 0], np.linspace(0, 1, M)).reshape(-1, 1),
+                     noise_var=0.02)
+        # theta frozen by hand: optimize Z only, by zeroing nothing -- instead
+        # run the joint optimizer and reset theta, which is not available, so
+        # ascend Z directly through the model's own gradient.
+        for _ in range(300):
+            model.fit(X, y)
+            _, _, gZ = model.elbo_and_grads()
+            model.Z = model.Z + 0.02 * gZ / (np.abs(gZ).max() + 1e-12)
+        model.fit(X, y)
+        mean, var = model.predict(Xs)
+        bounds.append(model.elbo())
+        mean_errs.append(float(np.abs(mean - mean_exact).max()))
+        sd_errs.append(float(np.abs(np.sqrt(var) - np.sqrt(var_exact)).max()))
+
+    assert bounds[0] < bounds[1] < bounds[2] < reference
+    assert mean_errs[0] > mean_errs[1] > mean_errs[2]
+    assert sd_errs[0] > sd_errs[1] > sd_errs[2]
+    assert reference - bounds[-1] < 0.05 * (reference - bounds[0])
