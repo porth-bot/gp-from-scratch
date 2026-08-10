@@ -31,6 +31,24 @@ That is why the inducing locations can be optimized like any other parameter
 without the overfitting risk a model parameter would carry -- and it is the
 structural difference from FITC, where Z do enter the model.
 
+FITC (``method="fitc"``, Snelson & Ghahramani 2006) is the same class with one
+flag flipped, because it is the same factorization with the shortfall moved.
+Where VFE subtracts tr(Kff - Qff) as a penalty, FITC puts its *diagonal* back
+inside the covariance and then maximizes an ordinary log evidence:
+
+    Lambda = diag(Kff - Qff),   L_FITC = log N(y | 0, Qff + Lambda + sigma^2 I).
+
+Everything below is written against a general diagonal D, with D = sigma^2 I for
+VFE and D = Lambda + sigma^2 I for FITC, so the two share every line of the
+factorization, the predictive equations, and the gradient contraction (Sec. 9.7).
+That sharing is what makes the comparison in experiments/fitc.py a comparison of
+two objectives rather than of two codebases. What is *not* shared is the meaning:
+L_FITC bounds nothing, Lambda is free heteroscedastic noise the model can hide
+misfit in, and Z are model parameters. The consequences are measured in
+experiments/fitc.py -- a fitted sigma^2 biased low, error bars too narrow where
+the data are and too wide between, and a shortfall FITC declines to reduce even
+at an M where VFE has eliminated it.
+
 Exact-recovery limit: with Z = X, Qff = Kff, the trace term vanishes, and both
 F and the predictive equations reduce to the exact GP of gp/gp.py. That is
 tests/test_sparse.py's first test, and it pins the algebra to an already-
@@ -42,23 +60,32 @@ and LB = chol(B), the matrix determinant lemma and Woodbury give the bound in
 O(n M^2) time and O(n M) memory (Sec. 9.5). The trace term uses only diag(Kff),
 never the full matrix.
 
-Gradients (Sec. 9.6). All three blocks -- kernel hyperparameters, log sigma^2,
-and the inducing locations Z -- contract against the same two matrices
+Gradients (Sec. 9.6, generalized in 9.7). All three blocks -- kernel
+hyperparameters, log sigma^2, and the inducing locations Z -- contract against
+the same two matrices
 
     R = P H     (M, n),      S = P H P^T   (M, M),
-    P = Kuu^-1 Kuf,          H = alpha alpha^T - W^-1 + sigma^-2 I,
+    P = Kuu^-1 Kuf,          H = alpha alpha^T - W^-1 + diag(v),
 
-with W = Qff + sigma^2 I and alpha = W^-1 y. H is n x n and is never formed;
-Woodbury turns both into O(n M^2). The +sigma^-2 I in H is the trace penalty's
-contribution folded in, so the penalty is not a separate gradient but a
-rank-correction to the matrix everything else already contracts against. Kff
-survives differentiation only through its diagonal, which is why the trace
-gradient goes through `kernel_grad_diag` and not `kernel.grads(X)`.
+with W = Qff + D, alpha = W^-1 y, and the objective's own diagonal correction
+carried entirely by the vector v:
+
+    VFE:   v = sigma^-2 1                (the trace penalty, folded in)
+    FITC:  v = -diag(alpha alpha^T - W^-1)   (which zeroes H's diagonal)
+
+and in both cases the Kff-diagonal block of the gradient is -1/2 <v, dkff_diag>.
+One vector is the entire difference between the two gradients. H is n x n and is
+never formed; Woodbury turns both contractions into O(n M^2). Kff survives
+differentiation only through its diagonal, which is why that block goes through
+`kernel_grad_diag` and not `kernel.grads(X)`.
 
 Honest limitations of what is here:
 
 - The bound is *collapsed*, so it needs all of y at once: no minibatching.
   SVGP (Hensman et al. 2013) is the uncollapsed version that does.
+- FITC is implemented to be measured, not recommended. Nothing here fixes it;
+  the flag exists so that the failure can be reproduced in the same code path
+  as the method that does not fail.
 - Gaussian likelihood only. The collapsed form is a Gaussian-conjugacy result.
 - The gradients exist but nothing drives them yet: joint ML-II over theta and Z
   is the next piece, and until it lands the caller still chooses Z.
@@ -159,7 +186,7 @@ def kernel_grad_diag(kernel: "Kernel", X: np.ndarray,
 
 
 class SGPR:
-    """Sparse variational GP regression (Titsias' collapsed bound).
+    """Sparse GP regression on M inducing points: Titsias' bound, or FITC.
 
     Parameters
     ----------
@@ -167,6 +194,15 @@ class SGPR:
     Z : array of shape (M, d)
         Inducing inputs. Copied on construction, so later mutation of the
         caller's array does not silently invalidate a fit.
+    method : {"vfe", "fitc"}
+        Which objective. ``"vfe"`` (default) is the Titsias variational bound:
+        the shortfall ``Kff - Qff`` is subtracted as a penalty and the result is
+        a lower bound on the exact log evidence. ``"fitc"`` keeps the shortfall's
+        diagonal inside the covariance instead and maximizes the log evidence of
+        that different model, which is not a bound on anything. The flag changes
+        one diagonal, ``D``, and one gradient vector, ``v``; everything else --
+        the factorization, the predictive equations, the contraction -- is
+        shared, deliberately (Sec. 9.7).
     noise_var : float
         Observation-noise variance sigma^2, stored in log space to match
         ``GPRegressor``.
@@ -210,20 +246,42 @@ class SGPR:
     True
     >>> bool(few.trace_term() > 0.0)
     True
+
+    The same inducing set under FITC computes the same shortfall and then
+    declines to pay for it, moving it into the covariance instead. Its objective
+    is therefore not a bound in either direction; on this data it lands between
+    the unpenalized DTC evidence (which is above the truth) and the penalized
+    bound (which is below it):
+
+    >>> fitc = SGPR(RBF(s2=1.0, l=1.0), Z=np.linspace(-3, 3, 5).reshape(-1, 1),
+    ...             noise_var=0.05, method="fitc").fit(X, y)
+    >>> bool(np.allclose(fitc.lambda_diag(), few.lambda_diag()))   # same shortfall
+    True
+    >>> bool(few.elbo() < fitc.objective() < few.dtc_log_evidence())
+    True
+
+    That ordering is this data, not a theorem: adding Lambda inflates the
+    covariance where DTC shrank it, and the two effects do not compose into an
+    inequality. ``tests/test_sparse.py::test_fitc_objective_is_not_a_bound_in
+    _either_direction`` exhibits FITC above the exact log evidence as well.
     """
 
     JITTER = 1e-10
+    METHODS = ("vfe", "fitc")
 
     def __init__(self, kernel: "Kernel", Z: np.ndarray, noise_var: float = 0.1,
-                 jitter: float = JITTER):
+                 jitter: float = JITTER, method: str = "vfe"):
         Z = np.atleast_2d(np.asarray(Z, dtype=float))
         if Z.shape[0] < 1:
             raise ValueError("need at least one inducing point")
         if jitter < 0:
             raise ValueError("jitter must be non-negative")
+        if method not in self.METHODS:
+            raise ValueError(f"method must be one of {self.METHODS}, got {method!r}")
         self.kernel = kernel
         self._Z = Z.copy()
         self.jitter = float(jitter)
+        self.method = method
         self.log_noise = float(np.log(noise_var))
         self._fitted = False
 
@@ -269,7 +327,21 @@ class SGPR:
     # -- fitting ---------------------------------------------------------------
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "SGPR":
-        """Build the O(n M^2) factorization the bound and predictions share."""
+        """Build the O(n M^2) factorization the objective and predictions share.
+
+        Written against a general observation diagonal ``D``, which is the only
+        place the two methods differ: ``D = sigma^2`` for VFE, and
+        ``D = Lambda + sigma^2`` for FITC, with ``Lambda = diag(Kff - Qff)``.
+        Substituting D back into the Sec. 9.5 factors gives
+
+            B = I + A D^-1 A^T,   c = L_B^-1 A D^-1 y,
+            log|Qff + D| = sum_i log D_i + 2 sum_i log (L_B)_ii,
+            y^T (Qff + D)^-1 y = sum_i y_i^2 / D_i - c^T c,
+
+        which reduces to (9.11) term by term at constant D. Nothing downstream
+        of here -- prediction, the contraction, the gradients -- needs a second
+        branch.
+        """
         self.X = np.atleast_2d(np.asarray(X, dtype=float))
         self.y = np.asarray(y, dtype=float)
         if self.X.shape[1] != self.Z.shape[1]:
@@ -291,33 +363,64 @@ class SGPR:
 
         self.L_uu = np.linalg.cholesky(Kuu)
         self.A = np.linalg.solve(self.L_uu, Kuf)                # (M, n), Qff = A^T A
-        B = np.eye(M) + (self.A @ self.A.T) / sn2
-        self.L_B = np.linalg.cholesky(B)
-        self.c = np.linalg.solve(self.L_B, self.A @ self.y) / sn2   # (M,)
 
-        # tr(Kff - Qff) = sum_i k(x_i, x_i) - ||A||_F^2, never forming Kff.
-        # Clipped at 0: it is provably non-negative (a conditional covariance
-        # has non-negative diagonal), so any negative value is float noise.
-        self._trace_term = float(max(np.sum(kff_diag) - np.sum(self.A**2), 0.0))
+        # Lambda_i = k(x_i, x_i) - q(x_i, x_i), the shortfall at each datum.
+        # Clipped at 0: each entry is the posterior variance of f(x_i) given u
+        # and so is provably non-negative, making any negative value float noise.
+        # The clip is not silently load-bearing -- it only ever fires where the
+        # true value is within float noise of zero (Z = X), and there the
+        # gradient contribution it would carry is of the same size.
+        self._lam = np.maximum(kff_diag - np.sum(self.A**2, axis=0), 0.0)
+        self.D = self._lam + sn2 if self.method == "fitc" else np.full(n, sn2)
+
+        AD = self.A / self.D                                    # (M, n)
+        B = np.eye(M) + AD @ self.A.T
+        self.L_B = np.linalg.cholesky(B)
+        self.c = np.linalg.solve(self.L_B, AD @ self.y)         # (M,)
+
+        self._trace_term = float(np.sum(self._lam))
         self._n = n
-        self._yTy = float(self.y @ self.y)
+        self._yTD_inv_y = float(np.sum(self.y**2 / self.D))
         self._fitted = True
         return self
 
-    # -- the bound -------------------------------------------------------------
+    # -- the objective ---------------------------------------------------------
+
+    def lambda_diag(self) -> np.ndarray:
+        """Lambda = diag(Kff - Qff): the shortfall at each datum, (n,).
+
+        The same vector under both methods -- it is a property of (Z, theta), not
+        of the objective. What differs is where it goes: VFE subtracts its sum
+        as a penalty, FITC adds it to the observation variance and calls the
+        misfit noise. Reading it per-point is how the FITC pathology becomes
+        visible: the points with large Lambda are exactly the ones FITC has
+        stopped needing sigma^2 for.
+        """
+        assert self._fitted
+        return self._lam.copy()
 
     def trace_term(self) -> float:
         """tr(Kff - Qff): the part of f the inducing set does not explain.
 
         Non-negative, zero iff u determines f at the data (e.g. Z = X). This is
-        the quantity that penalizes a bad inducing set; the bound subtracts
-        ``trace_term / (2 sigma^2)``.
+        the quantity that penalizes a bad inducing set under VFE; the bound
+        subtracts ``trace_term / (2 sigma^2)``. Under FITC it is still computed
+        -- it is ``sum(lambda_diag())`` -- but it is not paid for.
         """
         assert self._fitted
         return self._trace_term
 
+    def _log_evidence(self) -> float:
+        """log N(y | 0, Qff + D) for whichever D this method installed."""
+        assert self._fitted
+        log_det = float(np.sum(np.log(self.D))) + 2.0 * float(
+            np.sum(np.log(np.diag(self.L_B)))
+        )
+        quad = self._yTD_inv_y - float(self.c @ self.c)
+        return float(-0.5 * (log_det + quad + self._n * np.log(2.0 * np.pi)))
+
     def dtc_log_evidence(self) -> float:
-        """log N(y | 0, Qff + sigma^2 I) -- the bound's first term alone.
+        """log N(y | 0, Qff + sigma^2 I) -- the VFE bound's first term alone.
 
         This is the DTC / projected-process approximation's log evidence. It is
         NOT a lower bound on anything: Qff <= Kff in the PSD order, so a model
@@ -326,13 +429,27 @@ class SGPR:
         separately because seeing the two terms move against each other is the
         whole content of Sec. 9.3.
         """
-        assert self._fitted
-        sn2 = self.noise_var
-        log_det = self._n * np.log(sn2) + 2.0 * float(
-            np.sum(np.log(np.diag(self.L_B)))
-        )
-        quad = self._yTy / sn2 - float(self.c @ self.c)
-        return float(-0.5 * (log_det + quad + self._n * np.log(2.0 * np.pi)))
+        if self.method != "vfe":
+            raise ValueError(
+                "dtc_log_evidence is the VFE bound's first term; this model is "
+                f"method={self.method!r}, whose objective is objective()"
+            )
+        return self._log_evidence()
+
+    def fitc_log_evidence(self) -> float:
+        """log N(y | 0, Qff + Lambda + sigma^2 I) -- FITC's objective.
+
+        The log evidence of the FITC *model*, whose prior covariance is Qff with
+        the true diagonal restored. It bounds nothing: it is neither above nor
+        below the exact log evidence by any general argument, and
+        ``tests/test_sparse.py`` exhibits it on both sides.
+        """
+        if self.method != "fitc":
+            raise ValueError(
+                "fitc_log_evidence needs the FITC diagonal in D; this model is "
+                f"method={self.method!r}"
+            )
+        return self._log_evidence()
 
     def elbo(self) -> float:
         """The Titsias free energy F -- a lower bound on the exact log evidence.
@@ -342,48 +459,89 @@ class SGPR:
         Because it bounds the log marginal likelihood of the *unaugmented*
         model, it is comparable across different M and different Z: a larger F
         means a tighter approximation to the same fixed quantity.
+
+        VFE only, on purpose. FITC's objective is not an ELBO and calling it one
+        is the single most convenient way to forget that, so this raises rather
+        than quietly returning a number that no longer bounds anything.
+        """
+        if self.method != "vfe":
+            raise ValueError(
+                f"method={self.method!r} has no ELBO -- its objective is not a "
+                "bound on the log evidence. Call objective()"
+            )
+        return self.objective()
+
+    def objective(self) -> float:
+        """The scalar this model maximizes: the VFE bound, or FITC's evidence.
+
+        The method-agnostic entry point, and what ``gp.optimize.maximize_elbo``
+        ascends. What it *means* is method-dependent and that difference is the
+        point: for VFE it is a lower bound on log p(y) for the model that is
+        actually being fitted, comparable across M and Z; for FITC it is the
+        exact log evidence of a different model per (Z, theta), comparable
+        across nothing in particular.
         """
         assert self._fitted
-        return self.dtc_log_evidence() - self._trace_term / (2.0 * self.noise_var)
+        if self.method == "fitc":
+            return self._log_evidence()
+        return self._log_evidence() - self._trace_term / (2.0 * self.noise_var)
 
-    # -- gradients of the bound -------------------------------------------------
+    # -- gradients of the objective ---------------------------------------------
 
-    def _contractors(self) -> "tuple[np.ndarray, np.ndarray, np.ndarray, float]":
-        """R = P H, S = P H P^T, alpha = W^-1 y, and tr(W^-1) -- Sec. 9.6.
+    def _contractors(
+        self,
+    ) -> "tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]":
+        """R = P H, S = P H P^T, alpha = W^-1 y, tr(W^-1), and v -- Sec. 9.6-9.7.
 
-        H = alpha alpha^T - W^-1 + sigma^-2 I is n x n and is never formed.
-        Two Woodbury identities collapse it. With A = Luu^-1 Kuf and
-        B = I + sigma^-2 A A^T (so that A A^T / sigma^2 = B - I):
+        H = alpha alpha^T - W^-1 + diag(v) is n x n and is never formed. Two
+        Woodbury identities collapse it. With A = Luu^-1 Kuf, W = Qff + D and
+        B = I + A D^-1 A^T:
 
-            A W^-1 = sigma^-2 (A - A A^T B^-1 A / sigma^2) = sigma^-2 B^-1 A
-            alpha  = (y - A^T L_B^-T c) / sigma^2
+            A W^-1 = B^-1 A D^-1
+            alpha  = (y - A^T L_B^-T c) / D
 
-        so P H = Luu^-T [ (A alpha) alpha^T + sigma^-2 (A - B^-1 A) ], which is
-        M x n throughout. S is symmetric in exact arithmetic (H is); it is
-        symmetrized explicitly because the two triangular solves that build it
-        do not enforce that to the last bit, and an asymmetric S would leak an
-        antisymmetric part into the Z-gradient's Kuu term.
+        so P H = Luu^-T [ (A alpha) alpha^T - B^-1 A D^-1 + A diag(v) ], which is
+        M x n throughout. At D = sigma^2 and v = sigma^-2 this is exactly the
+        (9.17) form -- the two subtracted-and-added B^-1 A terms are the VFE
+        expression's ``(A - B^-1 A) / sigma^2``.
+
+        The diagonal correction v is the whole difference between the methods:
+        VFE folds its trace penalty in as ``+sigma^-2 I``, while FITC subtracts
+        H's own diagonal, because Lambda's dependence on (theta, Z) exactly
+        cancels the diagonal of dQff (9.24). So FITC's H has a zero diagonal --
+        the model has stopped caring how well Qff reproduces Kff *at the data*,
+        which is the pathology in one line of algebra.
+
+        S is symmetric in exact arithmetic (H is); it is symmetrized explicitly
+        because the two triangular solves that build it do not enforce that to
+        the last bit, and an asymmetric S would leak an antisymmetric part into
+        the Z-gradient's Kuu term.
         """
         assert self._fitted
-        sn2 = self.noise_var
-        A, L_B = self.A, self.L_B
+        A, L_B, D = self.A, self.L_B, self.D
 
-        alpha = (self.y - A.T @ np.linalg.solve(L_B.T, self.c)) / sn2   # (n,)
-        BinvA = np.linalg.solve(L_B.T, np.linalg.solve(L_B, A))         # (M, n)
+        alpha = (self.y - A.T @ np.linalg.solve(L_B.T, self.c)) / D      # (n,)
+        BinvA = np.linalg.solve(L_B.T, np.linalg.solve(L_B, A))          # (M, n)
+
+        # diag(W^-1) and its trace, by the same identity, without forming W^-1.
+        diag_W_inv = (1.0 - np.sum(A * BinvA, axis=0) / D) / D           # (n,)
+        tr_W_inv = float(np.sum(diag_W_inv))
+
+        if self.method == "fitc":
+            v = -(alpha**2 - diag_W_inv)
+        else:
+            v = np.full(self._n, 1.0 / self.noise_var)
 
         PH = np.linalg.solve(
-            self.L_uu.T, np.outer(A @ alpha, alpha) + (A - BinvA) / sn2
-        )                                                               # (M, n)
-        P = np.linalg.solve(self.L_uu.T, A)                             # (M, n)
+            self.L_uu.T, np.outer(A @ alpha, alpha) - BinvA / D + A * v
+        )                                                                # (M, n)
+        P = np.linalg.solve(self.L_uu.T, A)                              # (M, n)
         S = PH @ P.T
         S = 0.5 * (S + S.T)
+        return PH, S, alpha, tr_W_inv, v
 
-        # tr W^-1 = sigma^-2 (n - sigma^-2 tr(A^T B^-1 A)), same identity.
-        tr_W_inv = (self._n - float(np.sum(A * BinvA)) / sn2) / sn2
-        return PH, S, alpha, tr_W_inv
-
-    def elbo_and_grads(self) -> "tuple[float, np.ndarray, np.ndarray]":
-        """The bound, d F/d params, and d F/d Z (Sec. 9.6).
+    def objective_and_grads(self) -> "tuple[float, np.ndarray, np.ndarray]":
+        """The objective, d/d params, and d/d Z, for either method (9.18-9.20).
 
         Returns ``(F, grad_params, grad_Z)`` with ``grad_params`` matching
         ``self.params`` entry for entry (kernel theta, then log sigma^2) and
@@ -395,32 +553,47 @@ class SGPR:
         case -- k(z, z) is constant for a stationary kernel, so its input
         derivative is zero and the j = m term drops out on its own.
 
+        The Z block carries no Kff term under either method: Kff does not depend
+        on Z, which is (9.20)'s missing term for VFE and stays missing for FITC
+        even though Lambda does move -- the -1/2 <v, dkff_diag> piece is what
+        Lambda contributes, and dkff_diag/dZ = 0.
+
         Raises ``NotImplementedError`` (from the kernel) if the kernel has no
-        input-space derivative; ``elbo_grad_params`` still works in that case,
-        since only the Z block needs one.
+        input-space derivative; ``objective_grad_params`` still works in that
+        case, since only the Z block needs one.
         """
-        PH, S, alpha, tr_W_inv = self._contractors()
-        grad_params = self._grad_params(PH, S, alpha, tr_W_inv)
+        PH, S, alpha, tr_W_inv, v = self._contractors()
+        grad_params = self._grad_params(PH, S, alpha, tr_W_inv, v)
         Z, X = self.Z, self.X
 
         dKuf = self.kernel.dK_dX1(Z, X)          # (M, n, d)
         dKuu = self.kernel.dK_dX1(Z, Z)          # (M, M, d)
         grad_Z = (np.einsum("mj,mja->ma", PH, dKuf)
                   - np.einsum("mj,mja->ma", S, dKuu))
-        return self.elbo(), grad_params, grad_Z
+        return self.objective(), grad_params, grad_Z
 
-    def elbo_grad_params(self) -> "tuple[float, np.ndarray]":
-        """The bound and its gradient w.r.t. ``params`` only (no Z block).
+    def objective_grad_params(self) -> "tuple[float, np.ndarray]":
+        """The objective and its gradient w.r.t. ``params`` only (no Z block).
 
         The signature ``adam_maximize`` and friends expect. Separate from
-        ``elbo_and_grads`` because it works for every kernel, including the
+        ``objective_and_grads`` because it works for every kernel, including the
         ones with no input-space derivative.
         """
-        PH, S, alpha, tr_W_inv = self._contractors()
-        return self.elbo(), self._grad_params(PH, S, alpha, tr_W_inv)
+        PH, S, alpha, tr_W_inv, v = self._contractors()
+        return self.objective(), self._grad_params(PH, S, alpha, tr_W_inv, v)
 
-    def _grad_params(self, PH: np.ndarray, S: np.ndarray,
-                     alpha: np.ndarray, tr_W_inv: float) -> np.ndarray:
+    def elbo_and_grads(self) -> "tuple[float, np.ndarray, np.ndarray]":
+        """``objective_and_grads`` under its VFE name. Raises for FITC."""
+        self.elbo()                       # the method check, with its message
+        return self.objective_and_grads()
+
+    def elbo_grad_params(self) -> "tuple[float, np.ndarray]":
+        """``objective_grad_params`` under its VFE name. Raises for FITC."""
+        self.elbo()
+        return self.objective_grad_params()
+
+    def _grad_params(self, PH: np.ndarray, S: np.ndarray, alpha: np.ndarray,
+                     tr_W_inv: float, v: np.ndarray) -> np.ndarray:
         """(9.18) for the kernel block, (9.19) for the noise.
 
         The jitter is differentiated, not ignored. ``fit`` factorizes
@@ -434,6 +607,13 @@ class SGPR:
         omitting it put the log-s2 gradient 1.3e-4 out -- five orders of
         magnitude worse than j, and enough to fail a finite-difference check
         that RBF passes comfortably. Including it is one line.
+
+        The Kff-diagonal block is ``-1/2 <v, dkff_diag>`` for both methods: at
+        v = sigma^-2 it is VFE's trace penalty, and at v = -diag(H_0) it is
+        FITC's Lambda moving with theta. Only the noise block needs a branch,
+        and the branch is the mechanism: VFE carries ``+T/(2 sigma^4)``, which
+        always pushes the fitted noise up, and FITC carries nothing, because
+        Lambda does not depend on sigma^2 and has already absorbed the misfit.
         """
         sn2 = self.noise_var
         dKuf = self.kernel.grads(self.Z, self.X)       # cross-covariance grads
@@ -446,17 +626,19 @@ class SGPR:
             - 0.5 * float(np.sum(
                 S * (guu + self.jitter * float(np.mean(np.diag(guu))) * eye)
             ))
-            - float(np.sum(gff)) / (2.0 * sn2)
+            - 0.5 * float(v @ gff)
             for guf, guu, gff in zip(dKuf, dKuu, dkff)
         ]
 
-        # Noise: the exact-GP gradient plus the trace penalty's own sigma^2
-        # dependence, which always pushes the fitted noise UP -- variation the
-        # inducing set cannot explain is cheaper to call noise (Sec. 9.6).
-        grads.append(sn2 * (
-            0.5 * (float(alpha @ alpha) - tr_W_inv)
-            + self._trace_term / (2.0 * sn2**2)
-        ))
+        # Noise. The first half is the exact-GP gradient of Sec. 2. VFE adds the
+        # trace penalty's own sigma^2 dependence, which always pushes the fitted
+        # noise UP -- variation the inducing set cannot explain is cheaper to
+        # call noise (Sec. 9.6). FITC has no such term: dW/dsigma^2 = I there,
+        # since Lambda is a function of (theta, Z) alone.
+        noise_grad = 0.5 * (float(alpha @ alpha) - tr_W_inv)
+        if self.method == "vfe":
+            noise_grad += self._trace_term / (2.0 * sn2**2)
+        grads.append(sn2 * noise_grad)
         return np.array(grads)
 
     # -- prediction ------------------------------------------------------------

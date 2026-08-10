@@ -247,8 +247,11 @@ class SGPRFitResult:
     params : the log-space hyperparameters found (already set on the model).
     Z : the inducing locations found -- the model's own ``Z`` if they were
         held fixed.
-    elbo : the variational bound at ``(params, Z)``, i.e. the best value seen.
-    history : the bound at every step, in step order.
+    objective : the model's objective at ``(params, Z)``, i.e. the best value
+        seen. For a VFE model that is the variational bound and ``.elbo`` is an
+        alias for it; for a FITC model it is that model's log evidence, which is
+        not a bound, and ``.elbo`` raises rather than pretend otherwise.
+    history : the objective at every step, in step order.
     trace_term : ``tr(Kff - Qff)`` at the returned fit. Reported because it is
         the honest read-out of how much of f the inducing set still fails to
         explain, and it is the term that ``Z`` is doing most of its work on.
@@ -256,9 +259,20 @@ class SGPRFitResult:
 
     params: np.ndarray
     Z: np.ndarray
-    elbo: float
+    objective: float
     history: "list[float]"
     trace_term: float
+    is_bound: bool = True
+
+    @property
+    def elbo(self) -> float:
+        """``objective`` under its VFE name -- raises when it is not a bound."""
+        if not self.is_bound:
+            raise ValueError(
+                "this fit maximized FITC's log evidence, which is not an ELBO; "
+                "read .objective"
+            )
+        return self.objective
 
 
 def maximize_elbo(
@@ -273,10 +287,10 @@ def maximize_elbo(
 ) -> SGPRFitResult:
     """Joint ML-II on the Titsias bound: hyperparameters *and* inducing inputs.
 
-    Ascends ``model.elbo_and_grads`` over the concatenation of the log-space
+    Ascends ``model.objective_and_grads`` over the concatenation of the log-space
     hyperparameters and the flattened inducing locations, then leaves the model
     fit at the best iterate seen. With ``optimize_Z=False`` only the
-    hyperparameter block moves and ``model.elbo_grad_params`` is used instead,
+    hyperparameter block moves and ``model.objective_grad_params`` is used,
     which is what makes this work for kernels with no input-space derivative
     (Matern nu=1/2, Gibbs) and what the experiments use as the frozen-Z control.
 
@@ -300,6 +314,16 @@ def maximize_elbo(
     as it will go, the bound is still below the exact GP's log evidence *at the
     same hyperparameters*. The contrast is FITC, where Z do enter the model and
     the corresponding quantity is not a bound at all.
+
+    **It runs a ``method="fitc"`` model too**, and the name stays ``elbo``
+    because the ascent is the same ascent -- the objective, its two gradient
+    blocks, and the returned fit all come from the model. What changes is what
+    the run *means*: with FITC there is no ceiling, so a higher number is not
+    evidence of a better approximation, and the invariant above simply does not
+    hold. ``SGPRFitResult.elbo`` refuses to report it under that name;
+    ``.objective`` always works. ``experiments/fitc.py`` drives both through
+    here and scores them against the exact posterior instead of against their
+    own objectives, which is the only fair way to compare the two.
 
     Multi-start is not wired in here the way it is for the exact GP. The bound
     is multimodal in Z (permutations of the inducing set alone give M! copies
@@ -364,8 +388,8 @@ def maximize_elbo(
             model.Z = vec[n_params:].reshape(Z_shape)
         model.fit(X, y)
         if not optimize_Z:
-            return model.elbo_grad_params()
-        value, grad_params, grad_Z = model.elbo_and_grads()
+            return model.objective_grad_params()
+        value, grad_params, grad_Z = model.objective_and_grads()
         return value, np.concatenate([grad_params, grad_Z.ravel()])
 
     theta0 = np.asarray(model.params, dtype=float).copy()
@@ -386,7 +410,8 @@ def maximize_elbo(
     return SGPRFitResult(
         params=np.asarray(model.params, dtype=float).copy(),
         Z=np.asarray(model.Z, dtype=float).copy(),
-        elbo=float(model.elbo()),
+        objective=float(model.objective()),
         history=history,
         trace_term=float(model.trace_term()),
+        is_bound=getattr(model, "method", "vfe") == "vfe",
     )

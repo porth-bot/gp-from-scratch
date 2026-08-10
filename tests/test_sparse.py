@@ -13,7 +13,7 @@ import pytest
 
 from gp.gp import GPRegressor
 from gp.kernels import ARD, RBF, Gibbs, Matern, Periodic, RationalQuadratic
-from gp.optimize import adam_maximize, maximize_elbo
+from gp.optimize import adam_maximize, maximize_elbo, maximize_lml_multistart
 from gp.sparse import SGPR, kernel_diag, kernel_grad_diag
 
 
@@ -308,6 +308,13 @@ GRAD_IDS = ["rbf", "matern32", "matern52", "rq", "periodic", "sum", "product"]
 FD_EPS = 1e-5
 
 
+# Both helpers differentiate ``objective()``, not ``elbo()``, so the same two
+# functions check the VFE bound and the FITC log evidence. That is deliberate:
+# the two gradients share every line of the contraction (Sec. 9.7), so a checker
+# that only ever saw one of them would leave the shared part checked once and
+# the branch unchecked.
+
+
 def _fd_param_grads(model, X, y, eps=FD_EPS):
     p0 = model.params.copy()
     out = []
@@ -317,7 +324,7 @@ def _fd_param_grads(model, X, y, eps=FD_EPS):
             p = p0.copy()
             p[i] += sign * eps
             model.params = p
-            bumped.append(model.fit(X, y).elbo())
+            bumped.append(model.fit(X, y).objective())
         out.append((bumped[0] - bumped[1]) / (2 * eps))
     model.params = p0
     model.fit(X, y)
@@ -334,7 +341,7 @@ def _fd_Z_grads(model, X, y, eps=FD_EPS):
                 Zp = Z0.copy()
                 Zp[i, a] += sign * eps
                 model.Z = Zp
-                bumped.append(model.fit(X, y).elbo())
+                bumped.append(model.fit(X, y).objective())
             out[i, a] = (bumped[0] - bumped[1]) / (2 * eps)
     model.Z = Z0
     model.fit(X, y)
@@ -743,3 +750,371 @@ def test_optimized_inducing_points_converge_to_the_exact_posterior_in_M():
     assert mean_errs[0] > mean_errs[1] > mean_errs[2]
     assert sd_errs[0] > sd_errs[1] > sd_errs[2]
     assert reference - bounds[-1] < 0.05 * (reference - bounds[0])
+
+
+# -- FITC: the same factorization, a different objective ---------------------
+#
+# Sec. 9.7. FITC keeps diag(Kff - Qff) inside the covariance instead of paying
+# for it, which makes it a different model rather than a bound on this one.
+# These tests do two jobs: pin the shared algebra (recovery, gradients) exactly
+# as the VFE tests do, and *measure* the failure the shared code exists to make
+# visible -- the noise variance biased low, and the shortfall left unpaid.
+
+
+def _clumped(seed=1, n_per=25, sd=0.3):
+    """Six tight clusters. The design that makes the FITC pathology bite.
+
+    Lambda is large wherever the inducing set is thin, so a clumped design gives
+    FITC somewhere cheap to hide misfit: it can serve a few clusters exactly and
+    charge the rest to the diagonal. Uniform x makes the same failure milder
+    (measured in experiments/fitc.py), which is worth knowing -- the pathology
+    is a property of the design as much as of the method.
+    """
+    rng = np.random.default_rng(seed)
+    centres = np.linspace(-3, 3, 6)
+    X = np.sort(np.concatenate(
+        [c + 0.12 * rng.standard_normal(n_per) for c in centres]
+    )).reshape(-1, 1)
+    f = np.sin(2.0 * X).ravel() + 0.4 * np.cos(5.0 * X).ravel()
+    return X, f + sd * rng.standard_normal(len(X)), f, sd**2
+
+
+def test_fitc_at_z_equals_x_also_recovers_the_exact_gp():
+    """Z = X kills Lambda as well as the trace term, so the two methods and the
+    exact GP all coincide there. This is what pins FITC's shared factorization:
+    the general-D code path has to reduce to the constant-D one when D is
+    constant, and it is checked against gp/gp.py rather than against VFE.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    exact = GPRegressor(RBF(s2=1.0, l=1.0), noise_var=0.05).fit(X, y)
+    fitc = SGPR(RBF(s2=1.0, l=1.0), Z=X, noise_var=0.05, method="fitc").fit(X, y)
+
+    assert float(fitc.lambda_diag().max()) < 1e-9
+    assert abs(fitc.objective() - exact.log_marginal_likelihood()) < 1e-7
+
+    for noise in (False, True):
+        m_exact, v_exact = exact.predict(_grid(), include_noise=noise)
+        m_fitc, v_fitc = fitc.predict(_grid(), include_noise=noise)
+        assert np.abs(m_exact - m_fitc).max() < 1e-6
+        assert np.abs(v_exact - v_fitc).max() < 1e-8
+
+
+def test_fitc_and_vfe_compute_the_same_shortfall_and_price_it_differently():
+    """Lambda is a property of (Z, theta), not of the objective, so both methods
+    must produce it identically -- and then disagree about what it costs."""
+    rng = np.random.default_rng(3)
+    X, y = _toy(rng, n=120, lo=-4, hi=4)
+    Z = np.linspace(-4, 4, 7).reshape(-1, 1)
+    kw = dict(Z=Z, noise_var=0.02)
+    vfe = SGPR(RBF(s2=1.0, l=0.7), **kw).fit(X, y)
+    fitc = SGPR(RBF(s2=1.0, l=0.7), method="fitc", **kw).fit(X, y)
+
+    np.testing.assert_allclose(vfe.lambda_diag(), fitc.lambda_diag(), rtol=1e-12)
+    assert abs(vfe.trace_term() - fitc.trace_term()) < 1e-10
+    assert vfe.trace_term() > 1.0                       # a real shortfall
+    assert fitc.objective() != vfe.objective()
+    # VFE's objective is its own DTC term minus the penalty; FITC's is neither.
+    assert vfe.objective() == pytest.approx(
+        vfe.dtc_log_evidence() - vfe.trace_term() / (2 * vfe.noise_var)
+    )
+
+
+def test_fitc_objective_is_not_a_bound_in_either_direction():
+    """The structural difference from VFE, measured on both sides.
+
+    VFE's bound sits below the exact log evidence at every M by a theorem. FITC
+    has no such ceiling and no floor either: adding Lambda inflates a covariance
+    that Qff had shrunk, and the two effects do not compose into an inequality.
+    On this data (n = 400, RBF l = 0.3, sigma^2 = 0.01) FITC comes out 253 nats
+    BELOW the exact evidence at M = 16 and 1.1 nats ABOVE it at M = 32 -- and
+    the second number is the one that matters, because it is a model selection
+    criterion reporting the data as less surprising than the true model does.
+    """
+    rng = np.random.default_rng(2)
+    X = np.sort(rng.uniform(-4, 4, 400)).reshape(-1, 1)
+    y = np.sin(2 * X).ravel() + 0.1 * rng.standard_normal(400)
+    kw = dict(noise_var=0.01)
+    lml = GPRegressor(RBF(s2=1.0, l=0.3), **kw).fit(X, y).log_marginal_likelihood()
+
+    def fitc(M):
+        Z = np.linspace(-4, 4, M).reshape(-1, 1)
+        return SGPR(RBF(s2=1.0, l=0.3), Z=Z, method="fitc", **kw).fit(X, y)
+
+    below, above = fitc(16), fitc(32)
+    assert below.objective() < lml - 100.0
+    assert above.objective() > lml + 0.5
+    # and VFE, on the same two inducing sets, stays under the ceiling
+    for M in (16, 32):
+        Z = np.linspace(-4, 4, M).reshape(-1, 1)
+        assert SGPR(RBF(s2=1.0, l=0.3), Z=Z, **kw).fit(X, y).elbo() < lml
+
+
+@pytest.mark.parametrize("make_kernel", GRAD_KERNELS, ids=GRAD_IDS)
+def test_fitc_gradients_match_finite_differences(make_kernel):
+    """The parameter block of FITC's gradient, central-differenced.
+
+    Not a rerun of the VFE check with a flag flipped. FITC's Lambda depends on
+    theta through Qff, so the Kff-diagonal block of (9.18) picks up a
+    *data-dependent* coefficient v = -diag(alpha alpha^T - W^-1) where VFE has
+    the constant sigma^-2, and W itself is no longer a constant diagonal plus
+    low rank. Both changes are exactly the sort that leave the gradient
+    plausible and wrong.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng, n=60)
+    Z = rng.uniform(-3, 3, 7).reshape(-1, 1)
+    model = SGPR(make_kernel(), Z=Z, noise_var=0.07, method="fitc").fit(X, y)
+
+    _, analytic, _ = model.objective_and_grads()
+    numeric = _fd_param_grads(model, X, y)
+    # Judged against the gradient vector's own scale, not per component, which
+    # is the standard the Z block already uses. The VFE version of this test can
+    # afford per-component rtol=2e-5 and this one cannot: FITC's W is a varying
+    # diagonal plus low rank, so evaluating the objective is a few times noisier,
+    # and on Periodic (cond(Kuu) ~ 6e7) the small components of the central
+    # difference are cancellation-limited before they are truncation-limited.
+    # That is measured, not assumed -- see the eps sweep in the next test.
+    scale = max(np.abs(numeric).max(), 1.0)
+    assert np.abs(analytic - numeric).max() < 1e-4 * scale, (analytic, numeric)
+
+
+def test_the_fitc_finite_difference_floor_is_cancellation_not_an_error():
+    """Why the previous test is scored against the vector scale.
+
+    On the Periodic kernel at seven inducing points a period-2 kernel sees as
+    near-duplicates, the FITC parameter gradient's small components disagree
+    with a central difference at eps = 1e-5 by ~2e-4 relative. A gradient error
+    would hold that gap flat as eps falls (that is exactly how the missing
+    jitter term was caught, Sec. 9.6). Cancellation does the opposite: each
+    component has a V, and the V's floor is where the true error lives.
+
+    Measured here: every component's best relative error over a five-decade
+    sweep is below 1e-4, and the log-period component -- the one that fails at
+    eps = 1e-5 -- is worse at BOTH ends of the sweep than in the middle, by more
+    than an order of magnitude in each direction. That is a numerical floor.
+    """
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng, n=60)
+    Z = rng.uniform(-3, 3, 7).reshape(-1, 1)
+    kernel = Periodic(s2=1.1, l=0.9, p=2.0)
+    assert np.linalg.cond(kernel(Z, Z)) > 1e6              # the setup, not luck
+
+    model = SGPR(kernel, Z=Z, noise_var=0.07, method="fitc").fit(X, y)
+    _, analytic, _ = model.objective_and_grads()
+
+    epsilons = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
+    rel = np.array([
+        np.abs(analytic - _fd_param_grads(model, X, y, eps=e)) / np.abs(analytic)
+        for e in epsilons
+    ])                                                     # (len(eps), n_params)
+    assert rel.min(axis=0).max() < 1e-4, rel               # every component has a floor
+    period = rel[:, 2]                                     # log p, the failing one
+    assert period[0] > 10 * period.min() and period[-1] > 10 * period.min(), period
+
+
+@pytest.mark.parametrize("make_kernel", GRAD_KERNELS, ids=GRAD_IDS)
+@pytest.mark.parametrize("seed", [1, 2], ids=["Z1", "Z2"])
+def test_fitc_inducing_location_gradients_match_finite_differences(
+    make_kernel, seed
+):
+    """dL_FITC/dZ at random inducing sets. Z are model parameters here, not
+    variational ones, so this gradient is doing something different from
+    (9.20) -- it is free to move Z somewhere that makes the *model* fit
+    better rather than the approximation tighter, which is why FITC can end up
+    with a large Lambda it has no incentive to reduce."""
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng, n=60)
+    Z = np.random.default_rng(seed).uniform(-3.5, 3.5, 8).reshape(-1, 1)
+    model = SGPR(make_kernel(), Z=Z, noise_var=0.07, method="fitc").fit(X, y)
+
+    _, _, analytic = model.objective_and_grads()
+    numeric = _fd_Z_grads(model, X, y)
+    scale = max(np.abs(numeric).max(), 1.0)
+    assert np.abs(analytic - numeric).max() < 1e-4 * scale, (analytic, numeric)
+
+
+def test_fitc_gradients_match_finite_differences_in_two_dimensions():
+    """The (M, n, d) contraction again, under the other objective."""
+    rng = np.random.default_rng(11)
+    X = rng.uniform(-2, 2, size=(70, 2))
+    y = np.sin(X[:, 0]) * np.cos(1.5 * X[:, 1]) + 0.1 * rng.standard_normal(70)
+    Z = rng.uniform(-2, 2, size=(6, 2))
+
+    for kernel in (ARD(s2=1.2, lengthscales=[0.7, 1.4]), RBF(s2=1.1, l=0.9)):
+        model = SGPR(kernel, Z=Z, noise_var=0.05, method="fitc").fit(X, y)
+        _, gp_analytic, gz_analytic = model.objective_and_grads()
+        np.testing.assert_allclose(
+            gp_analytic, _fd_param_grads(model, X, y), rtol=2e-5, atol=1e-6
+        )
+        gz_numeric = _fd_Z_grads(model, X, y)
+        scale = max(np.abs(gz_numeric).max(), 1.0)
+        assert np.abs(gz_analytic - gz_numeric).max() < 1e-4 * scale
+
+
+def test_at_z_equals_x_the_fitc_gradient_is_also_the_exact_gp_gradient():
+    """The recovery argument differentiated, for the second objective. At Z = X
+    both objectives equal the exact log evidence identically in (theta,
+    sigma^2), so both gradients must equal gp.py's -- which means FITC's
+    data-dependent v has to collapse onto VFE's constant sigma^-2 there. It
+    does: Lambda = 0 makes W = Qff + sigma^2 I = Kff + sigma^2 I, and the
+    diagonal of H_0 that FITC subtracts is what VFE adds back."""
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    for make in (lambda: RBF(s2=1.2, l=0.9), lambda: Matern(nu=2.5, s2=0.8, l=1.1)):
+        exact = GPRegressor(make(), noise_var=0.05)
+        _, exact_grad = exact.lml_and_grad(X, y)
+        model = SGPR(make(), Z=X, noise_var=0.05, method="fitc").fit(X, y)
+        _, fitc_grad, grad_Z = model.objective_and_grads()
+        np.testing.assert_allclose(fitc_grad, exact_grad, rtol=1e-6, atol=1e-7)
+        assert np.abs(grad_Z).max() < 1e-5 * np.abs(fitc_grad).max()
+
+
+def test_the_two_noise_gradients_point_in_opposite_directions():
+    """The pathology's mechanism, one derivative up and before any fitting.
+
+    At the same (theta, sigma^2) with the same imperfect inducing set, VFE's
+    noise gradient carries +T/(2 sigma^4) and FITC's carries nothing, because
+    Lambda has already absorbed the misfit and does not depend on sigma^2. The
+    consequence is not a matter of degree: here the exact GP wants LESS noise
+    (gradient -33.8), FITC agrees with it (-9.3), and VFE alone wants more
+    (+382.7). Ascent from a shared start therefore moves the two fitted noise
+    levels apart from the first step.
+    """
+    rng = np.random.default_rng(7)
+    X = np.sort(rng.uniform(-4, 4, 100)).reshape(-1, 1)
+    y = np.sin(X).ravel() + 0.1 * rng.standard_normal(100)
+    Z = np.linspace(-4, 4, 6).reshape(-1, 1)
+    kw = dict(Z=Z, noise_var=0.04)
+
+    _, exact_grad = GPRegressor(RBF(s2=1.0, l=0.6), noise_var=0.04).lml_and_grad(X, y)
+    _, vfe_grad = SGPR(RBF(s2=1.0, l=0.6), **kw).fit(X, y).objective_grad_params()
+    _, fitc_grad = SGPR(RBF(s2=1.0, l=0.6), method="fitc",
+                        **kw).fit(X, y).objective_grad_params()
+
+    assert vfe_grad[-1] > 0.0 > fitc_grad[-1]
+    assert exact_grad[-1] < 0.0                    # the penalty is what flips VFE
+
+
+def test_fitc_fits_a_noise_variance_below_the_truth_and_vfe_does_not():
+    """The published pathology, reproduced at test scale (the full sweep is
+    experiments/fitc.py).
+
+    Same data, same initialization, same optimizer, one flag apart: FITC lands
+    at roughly a third of the true noise variance while VFE lands within ~10% of
+    it. The tolerances here are loose on purpose -- what is being tested is the
+    sign and the order of magnitude of the bias, not this seed's decimals.
+    """
+    X, y, _, true_noise = _clumped(seed=1)
+    Z0 = np.quantile(X, np.linspace(0.02, 0.98, 20)).reshape(-1, 1)
+
+    fitted = {}
+    for method in ("vfe", "fitc"):
+        model = SGPR(RBF(s2=1.0, l=1.0), Z=Z0.copy(), noise_var=0.2, method=method)
+        res = maximize_elbo(model, X, y, lr=0.05, steps=1500)
+        fitted[method] = (float(np.exp(res.params[-1])), res.trace_term)
+
+    vfe_noise, vfe_T = fitted["vfe"]
+    fitc_noise, fitc_T = fitted["fitc"]
+    assert 0.75 * true_noise < vfe_noise < 1.3 * true_noise
+    assert fitc_noise < 0.6 * true_noise
+    # and the reason: FITC keeps a large shortfall at an M where VFE has none.
+    assert vfe_T < 0.1
+    assert fitc_T > 5.0
+
+
+def test_fitc_is_the_overconfident_one_where_the_data_are():
+    """What the noise bias costs a user, scored on held-out data.
+
+    Held-out points drawn from the *same* clumped design, not a uniform grid,
+    and the distinction is the result rather than a detail: averaged over a
+    uniform grid FITC's predictive sd comes out 1.10x the exact GP's, because
+    between the clusters its variance blows back up past the truth. Where the
+    data actually are, the sign reverses -- sd 0.95x exact, 93.3% coverage of a
+    nominal 95% interval, and a worse held-out NLPD. Over-wide in the gaps and
+    over-narrow on the data is one failure, not two: both are the diagonal
+    Lambda replacing a noise level it has no reason to get right.
+
+    The exact GP at its own ML-II fit is the reference for both, since it is the
+    posterior each is approximating.
+    """
+    X, y, _, _ = _clumped(seed=2)
+    Xt, yt, _, _ = _clumped(seed=202)
+    Z0 = np.quantile(X, np.linspace(0.02, 0.98, 20)).reshape(-1, 1)
+
+    exact = GPRegressor(RBF(s2=1.0, l=1.0), noise_var=0.2)
+    maximize_lml_multistart(exact, X, y, n_restarts=3,
+                            rng=np.random.default_rng(0), steps=400)
+    mean_exact, var_exact = exact.predict(Xt, include_noise=True)
+    sd_exact = float(np.mean(np.sqrt(var_exact)))
+
+    def calibration(model):
+        mean, var = model.predict(Xt, include_noise=True)
+        z = (yt - mean) / np.sqrt(var)
+        nlpd = float(np.mean(0.5 * np.log(2 * np.pi * var) + 0.5 * z**2))
+        return float(np.mean(np.sqrt(var))) / sd_exact, float(np.mean(np.abs(z) < 1.96)), nlpd
+
+    out = {}
+    for method in ("vfe", "fitc"):
+        model = SGPR(RBF(s2=1.0, l=1.0), Z=Z0.copy(), noise_var=0.2, method=method)
+        maximize_elbo(model, X, y, lr=0.05, steps=1500)
+        out[method] = calibration(model)
+
+    (vfe_sd, vfe_cov, vfe_nlpd), (fitc_sd, fitc_cov, fitc_nlpd) = out["vfe"], out["fitc"]
+    assert fitc_sd < 0.98 < vfe_sd, out              # only one shrinks the band
+    assert fitc_cov < vfe_cov                        # and only one loses coverage
+    assert fitc_nlpd > vfe_nlpd + 0.02
+
+    # The uniform-grid statistic, which reverses -- stated here so that the
+    # choice of test points is visible rather than buried in the setup.
+    grid = _grid(200, -3.5, 3.5)
+    fitc = SGPR(RBF(s2=1.0, l=1.0), Z=Z0.copy(), noise_var=0.2, method="fitc")
+    maximize_elbo(fitc, X, y, lr=0.05, steps=1500)
+    _, v_fitc = fitc.predict(grid, include_noise=True)
+    _, v_exact_grid = exact.predict(grid, include_noise=True)
+    assert np.mean(np.sqrt(v_fitc)) / np.mean(np.sqrt(v_exact_grid)) > 1.0
+
+
+# -- the names that refuse ---------------------------------------------------
+
+
+def test_the_bound_named_methods_refuse_on_a_fitc_model():
+    """FITC's objective is not an ELBO, and the cheapest way to forget that is
+    to let it answer to the name. Every VFE-specific entry point raises."""
+    rng = np.random.default_rng(0)
+    X, y = _toy(rng)
+    Z = np.linspace(-3, 3, 5).reshape(-1, 1)
+    model = SGPR(RBF(), Z=Z, noise_var=0.05, method="fitc").fit(X, y)
+
+    for call in (model.elbo, model.elbo_and_grads, model.elbo_grad_params,
+                 model.dtc_log_evidence):
+        with pytest.raises(ValueError, match="bound|ELBO|VFE"):
+            call()
+    model.objective(), model.objective_and_grads(), model.fitc_log_evidence()
+
+    vfe = SGPR(RBF(), Z=Z, noise_var=0.05).fit(X, y)
+    with pytest.raises(ValueError, match="FITC"):
+        vfe.fitc_log_evidence()
+    assert vfe.elbo() == vfe.objective()
+
+    with pytest.raises(ValueError, match="method"):
+        SGPR(RBF(), Z=Z, method="dtc")
+
+
+def test_a_fitc_fit_result_will_not_call_itself_an_elbo():
+    """Same rule one level up, where it is easier to lose: maximize_elbo runs a
+    FITC model happily, and the result it hands back must not present the number
+    it maximized as a bound."""
+    X, y, _, _ = _clumped(seed=3, n_per=8)
+    Z0 = np.quantile(X, np.linspace(0.05, 0.95, 6)).reshape(-1, 1)
+
+    model = SGPR(RBF(s2=1.0, l=1.0), Z=Z0, noise_var=0.2, method="fitc")
+    res = maximize_elbo(model, X, y, lr=0.05, steps=60)
+    assert res.objective == model.objective()
+    assert not res.is_bound
+    with pytest.raises(ValueError, match="not an ELBO"):
+        res.elbo
+
+    vfe = SGPR(RBF(s2=1.0, l=1.0), Z=Z0, noise_var=0.2)
+    vres = maximize_elbo(vfe, X, y, lr=0.05, steps=60)
+    assert vres.is_bound and vres.elbo == vres.objective
