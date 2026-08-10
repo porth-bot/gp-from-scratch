@@ -889,10 +889,14 @@ def test_the_fitc_finite_difference_floor_is_cancellation_not_an_error():
     jitter term was caught, Sec. 9.6). Cancellation does the opposite: each
     component has a V, and the V's floor is where the true error lives.
 
-    Measured here: every component's best relative error over a five-decade
-    sweep is below 1e-4, and the log-period component -- the one that fails at
-    eps = 1e-5 -- is worse at BOTH ends of the sweep than in the middle, by more
-    than an order of magnitude in each direction. That is a numerical floor.
+    The V is the discriminating half of this test and the floor's *level* is
+    not: the level is set by how a particular BLAS rounds the triangular solves
+    at cond(Kuu) ~ 6e7, and it moved from 5.6e-06 on the machine this was
+    written on to 1.0e-04 on CI's numpy. So the floor is asserted loosely, to
+    rule out a *large* systematic residual, and the shape carries the argument.
+    A real algebra error does not have the shape at all -- the Day 2 jitter bug
+    sat at 1.3e-4 flat across every eps, which fails the V check at any
+    threshold and would pass a floor check set anywhere above it.
     """
     rng = np.random.default_rng(0)
     X, y = _toy(rng, n=60)
@@ -908,9 +912,13 @@ def test_the_fitc_finite_difference_floor_is_cancellation_not_an_error():
         np.abs(analytic - _fd_param_grads(model, X, y, eps=e)) / np.abs(analytic)
         for e in epsilons
     ])                                                     # (len(eps), n_params)
-    assert rel.min(axis=0).max() < 1e-4, rel               # every component has a floor
+    assert rel.min(axis=0).max() < 2e-3, rel               # no large residual
     period = rel[:, 2]                                     # log p, the failing one
     assert period[0] > 10 * period.min() and period[-1] > 10 * period.min(), period
+    # the V is not one component's quirk: every component's best eps beats its
+    # worst by orders of magnitude, which is what a truncation/cancellation
+    # trade-off looks like and what a constant offset cannot look like.
+    assert np.all(rel.max(axis=0) > 50 * rel.min(axis=0)), rel
 
 
 @pytest.mark.parametrize("make_kernel", GRAD_KERNELS, ids=GRAD_IDS)
