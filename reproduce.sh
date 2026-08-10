@@ -73,6 +73,7 @@ step "9. Gibbs kernel (input-dependent lengthscale)"    experiments/gibbs_kernel
 step "10. ML-II multimodality and multi-start"          experiments/multistart.py
 step "11. random Fourier features (rate, speed, gaps)"  experiments/rff.py
 step "12. sparse GPs: joint ML-II over Z, convergence"  experiments/sparse.py
+step "13. FITC vs VFE: the noise it hides in Lambda"    experiments/fitc.py
 
 echo
 echo "=================================================================="
