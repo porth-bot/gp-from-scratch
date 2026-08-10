@@ -1025,9 +1025,9 @@ dF/d(log sigma^2) = sigma^2 [ 1/2 ( alpha^T alpha - tr W^{-1} ) + T/(2 sigma^4) 
 The bracket's first half is exactly the exact-GP noise gradient of Sec. 2. The
 second half is new and it always *raises* the optimal noise: a sparse model that
 cannot explain `T` worth of function variation would rather call it noise. That
-is a real bias, not a bug, and it is the mechanism behind the FITC pathology
-Day 4 goes after — VFE pays for the shortfall in `sigma^2`, FITC hides it in the
-covariance instead.
+is a real bias, not a bug, and it is the mechanism Sec. 9.7 turns on its head:
+VFE pays for the shortfall in `sigma^2`, FITC hides it in the covariance
+instead, and fits a noise level below the truth as a result.
 
 **Inducing locations.** `Z` enters `Kuu` and `Kuf` and *not* `Kff` — the
 statement of Sec. 9.2 that `Z` is variational, now visible as a missing term.
@@ -1100,18 +1100,129 @@ and a product in 1D, and for RBF and ARD in 2D. The
 the `Kuu` term and the bound still increases, just toward the wrong place), so
 it is checked at random `Z` rather than at a single convenient configuration.
 
-### 9.7 What is deliberately not here yet
+### 9.7 FITC: the same factorization, the shortfall moved
 
-- **FITC** (Snelson & Ghahramani 2006) keeps the diagonal of `Kff - Qff`
-  inside the covariance instead of penalizing it: `Qff + diag(Kff - Qff) +
-  sigma^2 I`. It is a different *model*, not a bound on this one, so its `Z`
-  are model parameters and the argument of Sec. 9.2 does not apply to them.
+Sec. 9.6 left the trace penalty as *the* thing that makes `F` a bound. FITC
+(Snelson & Ghahramani 2006) is what happens if you decline to pay it, and it is
+worth deriving here rather than citing, because the two methods share almost all
+of their algebra and disagree about exactly one diagonal. `experiments/fitc.py`
+measures the consequence; this section is why the measurement comes out the way
+it does.
+
+**The model.** Instead of penalizing `Kff - Qff`, put its diagonal back into the
+prior:
+
+```
+Lambda := diag(Kff - Qff),      q(f) = N(0, Qff + Lambda).                       (9.21)
+```
+
+`Qff + Lambda` has the exact marginal variances `k(x_i, x_i)` of the true prior
+and Nystrom's rank-`M` structure everywhere off the diagonal. That is the whole
+idea, and it is a *different prior*, not a bound on this one — which is why the
+objective is an ordinary log evidence:
+
+```
+L_FITC = log N( y | 0, Qff + Lambda + sigma^2 I ).                               (9.22)
+```
+
+Two consequences follow immediately and both are testable. There is no Jensen
+step anywhere in (9.21)–(9.22), so `L_FITC` is not a lower bound on `log p(y)`
+and not an upper one either: `Qff <= Kff` pushes it up (the DTC effect of
+Sec. 9.3) and `+Lambda` pushes it back down, and neither wins in general.
+`tests/test_sparse.py` exhibits both signs on one dataset — 253 nats below the
+exact evidence at `M = 16`, 1.1 nats above it at `M = 32`. And `Z` now enter the
+*model*, so the Sec. 9.2 argument that they cannot overfit does not apply to
+them: optimizing `Z` here is model selection, with everything that implies.
+
+**One factorization for both.** Write the observation diagonal as
+
+```
+D := sigma^2 I              (VFE)          D := Lambda + sigma^2 I    (FITC)
+W := Qff + D,               A := Luu^{-1} Kuf,     B := I + A D^{-1} A^T,
+c := L_B^{-1} A D^{-1} y.                                                        (9.23)
+```
+
+Every Sec. 9.5 formula survives the substitution unchanged in form:
+`log|W| = SUM_i log D_i + 2 SUM_i log (L_B)_ii`, `y^T W^{-1} y = SUM_i y_i^2/D_i
+- c^T c`, and the predictive equations (9.12) are *identical* — `mean = tmp^T c`,
+`var = diag(K**) - colsum(As^2) + colsum(tmp^2)` — because the derivation of
+(9.10) never assumed `D` was constant. So `gp/sparse.py` implements both methods
+in one code path with one branch, in `fit`, on what goes into `D`.
+
+**One gradient for both, up to one vector.** Differentiating (9.22) with the
+same two identities as (9.14), and writing `H_0 := alpha alpha^T - W^{-1}` and
+`h := diag(H_0)`:
+
+```
+dL_FITC = 1/2 tr[ H_0 dW ],    dW = dQff + diag( dKff_diag - diag(dQff) )
+        = 1/2 <H_0 - diag(h), dQff>  +  1/2 <h, dKff_diag>.                      (9.24)
+```
+
+The `-diag(h)` is the entire content of FITC: `Lambda`'s dependence on `theta`
+and `Z` cancels the diagonal of `dQff` exactly, so **FITC's `H` has a zero
+diagonal**. The model has stopped caring how well `Qff` reproduces `Kff` at the
+data — it gets that right by construction, at every `Z`, for free. Setting
+
+```
+v := sigma^{-2} 1   (VFE)          v := -h   (FITC),        H := H_0 + diag(v)
+```
+
+both gradients are the *same* expression,
+
+```
+dF/dtheta = <R, dKuf/dtheta> - 1/2 <S, dKuu/dtheta> - 1/2 <v, dKff_diag/dtheta>
+dF/dz_ma  = SUM_j R_mj [d1 k(z_m, x_j)]_a - SUM_j S_mj [d1 k(z_m, z_j)]_a        (9.25)
+```
+
+with `R = P H` and `S = P H P^T` as in (9.17). Check the VFE column against
+(9.18): `v = sigma^{-2}` turns the last term into `-(1/(2 sigma^2)) SUM_i
+dk(x_i,x_i)`, which is the trace penalty. One vector is the difference between
+the two methods' hyperparameter and `Z` gradients. The `Z` block is unchanged in
+*form* for a second reason worth stating: `Kff` does not depend on `Z` under
+either method, so the `v` term simply is not there — `Lambda` moves with `Z`,
+but only through `Qff`, which `R` and `S` already carry.
+
+**The noise block is where they part.** For (9.22), `dW/d sigma^2 = I` and
+nothing else moves, because `Lambda` is a function of `(theta, Z)` alone:
+
+```
+dL_FITC / d(log sigma^2) = sigma^2 * 1/2 ( alpha^T alpha - tr W^{-1} ).          (9.26)
+```
+
+That is the exact-GP noise gradient of Sec. 2 and nothing more. Compare (9.19):
+VFE carries `+T/(2 sigma^4)`, strictly positive whenever the inducing set is
+imperfect, which always pushes the fitted noise *up*. **This one missing term is
+the pathology.** Measured at a shared `(theta, sigma^2)` with an imperfect
+inducing set (`tests/test_sparse.py::test_the_two_noise_gradients_point_in_
+opposite_directions`): the exact GP wants less noise (gradient `-33.8`), FITC
+agrees with it (`-9.3`), and VFE alone wants more (`+382.7`). The two fits
+separate from the first ascent step, and they separate in the direction the
+algebra says.
+
+The mechanism in words: a sparse model has variation it cannot explain. VFE can
+only call it noise, and `sigma^2` is one number shared by every data point, so
+calling it noise is expensive and honest. FITC has `Lambda`, which is `n` free
+non-negative numbers — a per-point noise level it never has to justify — so it
+charges the misfit there and leaves `sigma^2` to fit whatever is left. The
+result is a noise variance biased low and, where the data actually are,
+predictive intervals too narrow. `experiments/fitc.py` measures both, and also
+the half of the failure that is easy to miss: *between* the data clusters
+FITC's variance is too **wide**, so a predictive-sd average over a uniform grid
+reports it as conservative (1.215x the exact GP's) at the same `M` where
+held-out data say it is overconfident (0.956x).
+
+**What FITC is not.** It is not a worse approximation to the same posterior — it
+is a good fit to a different model, one whose prior has `n` extra variance
+parameters. Nothing above says it predicts badly in general; what it says is
+that its `sigma^2` is not the data's noise level and its error bars are not the
+exact GP's, so the two should not be read as if they were. `gp/sparse.py`
+implements it to be measured, not recommended.
+
+### 9.8 What is deliberately not here yet
+
 - **SVGP** (Hensman et al. 2013) keeps `q(u)` uncollapsed so the bound
   decomposes over data points and can be minibatched, and admits non-Gaussian
   likelihoods. The collapsed bound (9.8) cannot: it needs all of `y` at once.
-- ML-II over (9.18)–(9.20). The gradients exist and are checked; *driving* them
-  — joint optimization of hyperparameters and `Z`, and what the learned `Z`
-  actually look like — is the next piece.
 - Non-stationary and cusped kernels. `Gibbs` has no input-space derivative
   derived here and `Matern nu=0.5` has none to derive, so (9.20) does not apply
   to either; both raise rather than return something plausible.
@@ -1504,7 +1615,7 @@ consequence.
   *NeurIPS* 2006. (FITC, Sec. 9.7.)
 - M. Bauer, M. van der Wilk, and C. E. Rasmussen, "Understanding Probabilistic
   Sparse Gaussian Process Approximations," *NeurIPS* 2016. (What VFE and FITC
-  each do to the fitted noise and the predictive variance — the Day 4
-  comparison.)
+  each do to the fitted noise and the predictive variance; the claim
+  `experiments/fitc.py` tests.)
 - J. Hensman, N. Fusi, and N. D. Lawrence, "Gaussian Processes for Big Data,"
-  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.7.)
+  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.8.)

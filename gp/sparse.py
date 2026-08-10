@@ -87,8 +87,6 @@ Honest limitations of what is here:
   the flag exists so that the failure can be reproduced in the same code path
   as the method that does not fail.
 - Gaussian likelihood only. The collapsed form is a Gaussian-conjugacy result.
-- The gradients exist but nothing drives them yet: joint ML-II over theta and Z
-  is the next piece, and until it lands the caller still chooses Z.
 - Z-gradients need a kernel that is differentiable in its inputs, which rules
   out Gibbs (non-stationary, derivative not derived) and Matern nu=0.5 (a real
   cusp at r=0). Both raise from `kernel.dK_dX1` rather than returning a number.
