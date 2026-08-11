@@ -75,7 +75,15 @@ def test_only_the_triangle_is_read():
     """The strictly-upper entries of a lower factor are never touched. This is
     what licenses passing a Cholesky factor straight in without masking it, and
     it is checked by filling the unused triangle with garbage: an
-    implementation that read it would produce a different answer."""
+    implementation that read it would produce a different answer.
+
+    Both comparisons hold the memory layout fixed and vary only the junk. That
+    is not a detail: comparing ``solve_upper(L.T, ...)`` against
+    ``solve_upper(L.T.copy(), ...)`` compares an F-contiguous view with a
+    C-contiguous array, and some BLAS builds take a different path through the
+    two and disagree in the last bit -- which is a fact about layout, not about
+    which triangle was read. It failed on CI's Python 3.9 and passed here.
+    """
     L, _, rng = _factor(100)
     B = rng.standard_normal((100, 2))
     clean = solve_lower(L, B)
@@ -83,8 +91,9 @@ def test_only_the_triangle_is_read():
     dirty[np.triu_indices(100, 1)] = 1e6
     assert np.array_equal(solve_lower(dirty, B), clean)
 
-    upper_clean = solve_upper(L.T, B)
-    dirty_u = L.T.copy()
+    upper = np.ascontiguousarray(L.T)
+    upper_clean = solve_upper(upper, B)
+    dirty_u = upper.copy()
     dirty_u[np.tril_indices(100, -1)] = 1e6
     assert np.array_equal(solve_upper(dirty_u, B), upper_clean)
 
