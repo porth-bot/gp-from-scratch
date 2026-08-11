@@ -14,6 +14,7 @@ import pytest
 from gp.gp import GPRegressor
 from gp.kernels import ARD, RBF, Gibbs, Matern, Periodic, RationalQuadratic
 from gp.optimize import adam_maximize, maximize_elbo, maximize_lml_multistart
+from gp.rff import RFFMap, RFFRegressor
 from gp.sparse import SGPR, kernel_diag, kernel_grad_diag
 
 
@@ -214,6 +215,138 @@ def test_predictive_variance_survives_near_total_cancellation():
     _, var = sparse.predict(X)
     assert np.all(var >= 0.0)
     assert var.min() < 1e-8                        # cancellation is near-total
+
+
+def test_predictive_matches_an_independent_dtc_oracle():
+    """The factorized predictive against the textbook DTC formula, written here
+    with explicit inverses and sharing no code with gp/sparse.py.
+
+    `test_z_equals_x_recovers_the_exact_gp` pins the M = n corner, where the
+    approximation is not an approximation. This pins the interior: the O(nM^2)
+    Cholesky path, the two variance corrections, and their cancellation are
+    checked against
+
+        mean = k*u Sig Kuf y / s2,   var = k** - Q** + k*u Sig ku*,
+        Sig  = (Kuu + s^-2 Kuf Kfu)^-1,   Q** = k*u Kuu^-1 ku*,
+
+    at an M where Qff is genuinely far from Kff. Without this, the only oracle
+    for the predictive was the exact GP at a corner the approximation collapses
+    to, which would not catch an error in the corrections themselves.
+
+    The tolerance is scaled by cond(Kuu) rather than fixed, because the oracle
+    is the *less* stable of the two computations: it forms Kuu^-1 explicitly,
+    twice, where the implementation only ever solves against a Cholesky factor.
+    The disagreement tracks the conditioning across three kernels spanning four
+    decades of it -- RBF at cond 6.0e6 disagrees at 1.6e-6, Matern at 1.2e3 at
+    2.1e-10, RationalQuadratic at 1.7e2 at 1.4e-10, i.e. a flat ~1e3 * cond *
+    eps. That shape is the portable claim; the level is not (cf.
+    `test_the_fitc_finite_difference_floor_is_cancellation_not_an_error`).
+    """
+    eps = np.finfo(float).eps
+    rng = np.random.default_rng(11)
+    for kernel in (RBF(s2=1.3, l=0.7), Matern(nu=2.5, s2=0.8, l=0.4),
+                   RationalQuadratic(s2=1.1, l=0.6, alpha=2.0)):
+        X, y = _toy(rng, n=90, lo=-3, hi=3)
+        Z = rng.uniform(-3.5, 3.5, (11, 1))
+        noise_var = 0.07
+        model = SGPR(kernel, Z, noise_var=noise_var).fit(X, y)
+        Xs = _grid(n=40)
+        mean, var = model.predict(Xs)
+
+        Kuu = kernel(Z, Z) + model.jitter * np.eye(len(Z))
+        Kuf, Kus = kernel(Z, X), kernel(Z, Xs)
+        Sig = np.linalg.inv(Kuu + Kuf @ Kuf.T / noise_var)
+        Qss = np.einsum("ji,jk,ki->i", Kus, np.linalg.inv(Kuu), Kus)
+        oracle_mean = Kus.T @ Sig @ Kuf @ y / noise_var
+        oracle_var = np.diag(kernel(Xs, Xs)) - Qss + np.einsum(
+            "ji,jk,ki->i", Kus, Sig, Kus)
+
+        tol = 1e5 * np.linalg.cond(Kuu) * eps
+        assert np.abs(mean - oracle_mean).max() < tol
+        assert np.abs(var - oracle_var).max() < tol
+        # the gate above is a floor, not a licence: it still has to be tiny
+        # against the quantities themselves.
+        assert np.abs(mean - oracle_mean).max() < 1e-5 * np.abs(mean).max()
+        assert np.abs(var - oracle_var).max() < 1e-5 * np.abs(var).max()
+        # and the approximation is actually doing something at this M
+        assert model.trace_term() > 1.0
+
+
+def test_inducing_points_keep_the_error_bar_random_features_lose():
+    """Sec. 11's headline, at test scale: same data, same kernel, same rank.
+
+    Across a gap in the data an exact GP widens to nearly the prior. At rank 32
+    every draw of the random-feature map loses most of that width, while the
+    inducing-point model reproduces it to within 1% -- with Z placed at the
+    data quantiles and never optimized, so the win is not tuning.
+    """
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-4, 4, 1280)
+    X = np.sort(x[np.abs(x) > 1.2][:800]).reshape(-1, 1)
+    y = np.sin(2.0 * X[:, 0]) + 0.1 * rng.standard_normal(len(X))
+    s2, ell, noise_var, R = 1.0, 0.5, 0.01, 32
+
+    Xs = _grid(n=201, lo=-4, hi=4)
+    centre = int(np.argmin(np.abs(Xs.ravel())))
+    _, var_exact = GPRegressor(RBF(s2=s2, l=ell),
+                               noise_var=noise_var).fit(X, y).predict(Xs)
+    sd_exact = float(np.sqrt(var_exact[centre]))
+    assert sd_exact > 0.9                       # the exact GP does widen here
+
+    Z = np.quantile(X[:, 0], np.linspace(0, 1, R)).reshape(-1, 1)
+    _, var_sparse = SGPR(RBF(s2=s2, l=ell), Z,
+                         noise_var=noise_var).fit(X, y).predict(Xs)
+    assert abs(float(np.sqrt(var_sparse[centre])) - sd_exact) / sd_exact < 0.01
+
+    for draw in range(5):
+        phi = RFFMap(R, ell, s2, 1, np.random.default_rng(draw))
+        _, var_rff = RFFRegressor(phi, noise_var=noise_var).fit(X, y).predict(Xs)
+        assert float(np.sqrt(var_rff[centre])) < 0.5 * sd_exact
+
+
+def test_an_isolated_inducing_point_in_a_gap_is_overconfident():
+    """The counterweight, pinned so it cannot be quietly lost.
+
+    Inducing points are not automatically safe: the safety comes from the
+    k** - Q** term, which is only large where x* is far from every z. Put an
+    inducing point *inside* an empty region and that margin is spent, leaving
+    the band to be inherited from the DTC posterior over u -- which is far too
+    tight, because the deterministic training conditional treats all n
+    observations as noise-only readouts of M numbers and so over-determines
+    them. Same data and same M as the quantile placement, which stays honest.
+    """
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-4, 4, 1280)
+    X = np.sort(x[np.abs(x) > 1.2][:800]).reshape(-1, 1)
+    y = np.sin(2.0 * X[:, 0]) + 0.1 * rng.standard_normal(len(X))
+    kernel, noise_var, M = RBF(s2=1.0, l=0.5), 0.01, 10
+
+    Xs = _grid(n=201, lo=-4, hi=4)
+    centre = int(np.argmin(np.abs(Xs.ravel())))
+    _, var_exact = GPRegressor(RBF(s2=1.0, l=0.5),
+                               noise_var=noise_var).fit(X, y).predict(Xs)
+    sd_exact = float(np.sqrt(var_exact[centre]))
+
+    quantile_Z = np.quantile(X[:, 0], np.linspace(0, 1, M)).reshape(-1, 1)
+    grid_Z = np.linspace(-4, 4, M).reshape(-1, 1)
+    assert np.abs(quantile_Z).min() > 1.2       # quantiles straddle the gap
+    assert np.abs(grid_Z).min() < 1.2           # the blind grid lands inside it
+
+    _, var_q = SGPR(kernel, quantile_Z, noise_var=noise_var).fit(X, y).predict(Xs)
+    _, var_g = SGPR(kernel, grid_Z, noise_var=noise_var).fit(X, y).predict(Xs)
+    assert float(np.sqrt(var_q[centre])) > 0.98 * sd_exact
+    assert float(np.sqrt(var_g[centre])) < 0.6 * sd_exact
+
+    # and the mechanism, not just the symptom: the margin is what differs
+    xstar = Xs[centre:centre + 1]
+    margins = []
+    for Z in (quantile_Z, grid_Z):
+        Kuu = kernel(Z, Z) + SGPR.JITTER * np.eye(M)
+        Kus = kernel(Z, xstar)
+        Qss = float((Kus.T @ np.linalg.solve(Kuu, Kus))[0, 0])
+        margins.append(float(kernel(xstar, xstar)[0, 0]) - Qss)
+    assert margins[0] > 0.99                    # quantile: margin intact
+    assert margins[1] < 0.3 * margins[0]        # grid: most of it spent
 
 
 # -- the O(n) diagonal -------------------------------------------------------
