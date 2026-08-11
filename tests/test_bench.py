@@ -117,33 +117,36 @@ def test_max_rss_is_in_bytes_on_this_platform():
     assert 8e6 < rss < 8e12, (rss, sys.platform)
 
 
-def test_max_rss_grows_when_a_large_array_is_touched_and_never_comes_back_down():
-    """Two properties in one fresh process, because both are about history.
+def test_max_rss_covers_a_touched_array_and_never_comes_back_down():
+    """Two properties in one fresh process, both about history.
 
-    First, the mark responds to real use: writing a large array moves it by
-    about the size of the array. Touched, not merely allocated -- RSS counts
-    pages the process has written.
+    First, the mark covers memory that is really in use: after writing every
+    page of an N-byte array, the peak is at least about N. That is the
+    assertion that pins the *unit* against real use -- a kilobyte/byte mix-up
+    misses it by 1024x.
 
     Second, and this is the one that shapes `experiments/cost_scaling.py`: the
-    mark does not come back down when the array is freed. A second, smaller
-    workload in the same process is therefore unmeasurable, which is why the
-    sweep runs one subprocess per cell rather than a loop.
+    mark does not come back down when the array is freed, so a second, smaller
+    workload in the same process is unmeasurable, which is why the sweep runs
+    one subprocess per cell rather than a loop.
 
-    The probe is sized *against the mark it has to beat* rather than fixed,
-    which is not fussiness: this test first ran with a 200 MB array and passed
-    locally (a fresh interpreter there peaks at 27 MB) while failing on CI,
-    where importing NumPy leaves a 490 MB high-water mark and a 200 MB write is
-    invisible underneath it. That is the same effect the test is about, arriving
-    one level up.
+    What this deliberately does *not* assert is that the mark went up by the
+    size of the array, and two CI failures are the reason. On this machine a
+    fresh interpreter peaks at 27 MB, so a 200 MB write moved it by 200 MB. On
+    the GitHub runner, importing NumPy leaves a 490 MB mark, and writing a
+    495 MB array moved it by 32 MB -- the allocator handed back pages the
+    process had already touched and released, which are resident and counted
+    already. Both observations are correct behavior for a high-water mark of
+    *resident* pages, and only the covering property is portable between them.
     """
     script = """
 import numpy as np
 from gp.bench import max_rss
 mb = 1e6
 before = max_rss()
-want = 0.6 * before + 200e6            # comfortably clear of the existing mark
+want = 1.2 * before + 200e6            # larger than the mark it has to clear
 n = int((want / 8) ** 0.5)
-block = np.ones((n, n))                # 8 n^2 bytes, fully written
+block = np.ones((n, n))                # 8 n^2 bytes, every page written
 after = max_rss()
 del block
 small = np.ones((100, 100))            # 80 KB
@@ -155,7 +158,8 @@ print(before / mb, after / mb, max_rss() / mb, 8 * n * n / mb)
         cwd=str(pathlib.Path(__file__).resolve().parents[1]),
     )
     before, after, after_free, written = (float(v) for v in out.stdout.split())
-    assert after - before > 0.5 * written  # the write shows up in the mark
+    assert after >= 0.9 * written          # the mark covers what was resident
+    assert after >= before                 # monotone
     assert after_free >= after             # and never comes back down
 
 
