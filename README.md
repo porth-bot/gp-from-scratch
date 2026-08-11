@@ -595,6 +595,94 @@ for free, and one that follows the *domain* does not.
 
 <p align="center"><img src="figures/rff_vs_sparse.png" width="960"></p>
 
+### 12. What it all costs, measured (`experiments/cost_scaling.py`)
+
+Every section above quoted a complexity — $O(n^3)$ and $O(n^2)$ for the exact
+GP, $O(nM^2)$ and $O(nM)$ for SGPR — and none of them measured one. This does:
+wall clock, peak memory, and the exponents they actually scale at, one
+subprocess per cell (peak RSS is a high-water mark and cannot be reset in
+process). Memory is reported twice on purpose. **NumPy bytes** is the peak of
+what NumPy requested, deterministic on any machine; **RSS** is what the OS
+backed, which is what decides whether a fit runs at all.
+
+| $n$ | exact: s | exact: RSS | exact: NumPy | SGPR $M{=}64$: s | SGPR: RSS | speed-up |
+|---|---|---|---|---|---|---|
+| 1000 | 0.012 | 32 MB | 24 MB | 0.0027 | 5.8 MB | 4.6× |
+| 4000 | 0.363 | 407 MB | 384 MB | 0.0087 | 14.5 MB | 42× |
+| 8000 | 1.603 | 1.58 GB | 1.54 GB | 0.0167 | 25.2 MB | 96× |
+| 16000 | 13.81 | 5.20 GB | — | 0.0342 | 45.8 MB | **404×** |
+| 128000 | — | — | — | 0.351 | 338 MB | — |
+
+**The exponents, and why two of them miss.** Fitted over the tail
+($n \ge 2000$): exact time $n^{2.64}$ against a theoretical 3, exact memory
+$n^{1.87}$ against 2 — and NumPy bytes exactly $n^{2.00}$. SGPR gives
+$n^{1.04}$ and $n^{0.99}$. The two that miss are not rounding, and the script
+prints what is behind them rather than asserting constants:
+
+- The *time* exponent is still climbing. The local exponent between
+  consecutive sizes runs 1.66, 2.04, 2.85, 2.14, 3.11 — the sweep only reaches
+  the asymptotic regime at the top, because the $O(n^2)$ kernel evaluation is
+  still 22% of the fit at $n = 8000$. Cholesky does not overtake it until
+  $n = 4000$.
+- The *RSS* exponent misses because RSS counts touched pages: it tracks the
+  NumPy request to within 3% up to $n = 8000$ and then falls 15% below it at
+  16000, where one of the three matrices below is written only on its diagonal.
+
+**The peak is three copies of the Gram matrix, exactly, and the Cholesky owns
+two of them.** Traced at $n = 2400$: `sqdist` alone 2.00 × $8n^2$,
+`kernel(X, X)` 2.00, `np.linalg.cholesky` given $K$ 2.00 (its private working
+copy plus its output), and a whole `fit` 3.00 — $K$ alive while LAPACK
+factorizes a copy of it. The obvious economy, adding the noise diagonal in
+place instead of building an $n \times n$ matrix to hold $n$ numbers, was tried
+and **is not in the code**: it changes nothing measurable (1578.2 MB vs
+1578.5 MB peak RSS, identical NumPy peak), because that allocation reaches 3
+copies at its own moment too. Getting below 3 needs an in-place Cholesky, which
+NumPy does not expose.
+
+**The wall.** The largest exact fit run here is $n = 16000$: 13.8 s and 5.20 GB.
+Everything past that is extrapolation and is labelled as such — the fitted law
+$77.2 \, n^{1.87}$ bytes reaches this machine's 17.2 GB at $n \approx 29{,}700$
+and would want 166 GB at $n = 10^5$. That is the real end of the exact GP: not
+a gradual slowdown but a fit that does not start.
+
+**The crossover, in the other direction.** SGPR at $M = 64$ is *dearer* than
+the exact GP below $n \approx 170$ — it still touches all $n$ points and then
+does $M \times M$ algebra the exact fit does not.
+
+**In $M$, the theory is barely visible.** At $n = 16000$ the measured time
+exponent in $M$ is 0.55, not 2, because the $O(nM^2)$ Gram product is 13% of
+the fit at $M = 64$ and does not overtake the $O(nM)$ kernel evaluation until
+$M = 1024$. In the range anyone uses, SGPR is bandwidth-bound on evaluating
+$k(Z, X)$, not flop-bound on the algebra the complexity is named after.
+
+And what the speed-up cost, on the same data: at $M = 64$ the bound is within
+$2.9 \times 10^{-5}$ nats of the exact log evidence at $n = 16000$, with
+posterior sd error $3 \times 10^{-6}$. That is a fact about a smooth 1D target
+with one lengthscale — §11 is the setting where the same $M$ is not nearly
+enough, and it is the one to read this table against.
+
+<p align="center"><img src="figures/cost_scaling.png" width="960"></p>
+
+**One bug fell out of this.** `np.linalg.solve(L, B)` is not a triangular
+solve. NumPy exposes no triangular solver, so handing it a Cholesky factor runs
+a general LU with partial pivoting first — $\frac{2}{3}n^3$ flops, twice the
+Cholesky that produced the factor — to get what substitution gets in $n^2$.
+`fit` did it twice and `predict` once, so the exact GP spent about four
+Choleskys re-factorizing a matrix it had already factorized. `gp/linalg.py`
+now does blocked forward and back substitution (all GEMM except a $64 \times 64$
+block solve per block row), agreeing with the LU path to 3.6e-16:
+
+| | $n=2000$ | $n=4000$ | $n=8000$ | $n=16000$ |
+|---|---|---|---|---|
+| before | 0.160 s | 1.218 s | 7.698 s | 57.87 s |
+| after | 0.054 s | 0.307 s | 1.527 s | 12.27 s |
+
+The same fix in `gp/sparse.py` and `gp/rff.py` is worth a third at the top of
+the rank sweep (SGPR $M = 1024$: 0.603 s → 0.393 s; RFF $D = 2048$: 0.670 s →
+0.477 s) and nothing at $M = 64$, since there the factor is small. Every
+number elsewhere in this README is unchanged — the suite, including the
+scikit-learn parity oracle at 1e-8, passes untouched.
+
 ## Reproduce
 
 One command, from a clean clone:
@@ -602,7 +690,7 @@ One command, from a clean clone:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
-./reproduce.sh                  # tests, mypy, then all 11 experiments: ~4 min total
+./reproduce.sh                  # tests, mypy, then all 15 experiments: ~5 min total
 ```
 
 `requirements.txt` pins the exact versions every committed figure and number was
@@ -611,12 +699,13 @@ CI goes on testing against current releases on 3.9 and 3.12.
 
 **How exact is it? The script tells you, rather than this paragraph asking to
 be believed.** Rerunning the whole suite in that pinned environment regenerates
-13 of the 15 committed PNGs byte-for-byte: every experiment is seeded and
+15 of the 19 committed PNGs byte-for-byte: every experiment is seeded and
 NumPy's bit generators are stable across versions, so the datasets, the ML-II
-fits, and the tables are identical. The two files that differ are
-`sklearn_parity.png` and `rff.png`, both of which plot wall-clock and so
-measure the machine — their accuracy claims (agreement to ~1e-10; the
-$D^{-1/2}$ error curve) are the portable ones.
+fits, and the tables are identical. The four that differ are
+`sklearn_parity.png`, `rff.png`, `rff_vs_sparse.png` and `cost_scaling.png`,
+all of which plot wall-clock and so measure the machine — their accuracy
+claims (agreement to ~1e-10; the $D^{-1/2}$ error curve; the *exponents*
+rather than the seconds) are the portable ones.
 
 `reproduce.sh` ends by checking exactly that against `git status`, and names
 any *other* figure that changed. That check exists because the claim was false
@@ -631,7 +720,7 @@ first run.
 To run a single experiment instead (timings measured by `reproduce.sh`):
 
 ```bash
-pytest                          # 95 tests (incl. 11 docstring examples); RuntimeWarnings are errors
+pytest                          # 272 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -645,6 +734,10 @@ python spatial2d.py             # ~1 s  (2D field: mean + uncertainty surfaces)
 python gibbs_kernel.py          # ~2 s  (nonstationary: input-dependent lengthscale)
 python multistart.py            # ~3 s  (ML-II multimodality; multi-restart escapes a bad basin)
 python rff.py                   # ~50 s (random Fourier features: rate, speed, and variance starvation)
+python sparse.py                # ~35 s (sparse GPs: joint ML-II over Z, convergence in M)
+python fitc.py                  # ~40 s (FITC vs VFE: the noise it hides in Lambda)
+python rff_vs_sparse.py         # ~90 s (features vs inducing points, same gap)
+python cost_scaling.py          # ~40 s (time, memory, exponents; --max-n 8000 skips the top)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.

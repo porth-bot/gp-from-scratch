@@ -3,7 +3,7 @@
 # Regenerate every figure in figures/ and every number in the README, end to
 # end, from a clean checkout.
 #
-#     ./reproduce.sh              # full suite, ~4 min
+#     ./reproduce.sh              # full suite, ~5 min
 #     PYTHON=/path/to/python ./reproduce.sh
 #
 # There is nothing to download and no cached state: the library is NumPy, the
@@ -75,6 +75,7 @@ step "11. random Fourier features (rate, speed, gaps)"  experiments/rff.py
 step "12. sparse GPs: joint ML-II over Z, convergence"  experiments/sparse.py
 step "13. FITC vs VFE: the noise it hides in Lambda"    experiments/fitc.py
 step "14. features vs inducing points, same gap"        experiments/rff_vs_sparse.py
+step "15. cost: seconds, bytes, and the exponents"      experiments/cost_scaling.py
 
 echo
 echo "=================================================================="
@@ -84,11 +85,11 @@ echo "=================================================================="
 
 # Check the reproduction claim instead of asserting it. Everything above was
 # just regenerated from seeded code, so any figure that now differs from the
-# committed copy is either an expected machine-dependent one (the two that plot
+# committed copy is either an expected machine-dependent one (the four that plot
 # wall-clock) or real drift between the code and what the repo ships -- which is
 # how figures/co2_forecast.png and figures/ntk_linearization.png sat stale, an
 # older environment's bytes, until someone rebuilt them from a clean clone.
-TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png figures/rff_vs_sparse.png"
+TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png figures/rff_vs_sparse.png figures/cost_scaling.png"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     changed=$(git status --porcelain -- figures/ | awk '{print $2}')
     unexpected=""
