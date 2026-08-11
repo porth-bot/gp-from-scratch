@@ -120,35 +120,42 @@ def test_max_rss_is_in_bytes_on_this_platform():
 def test_max_rss_grows_when_a_large_array_is_touched_and_never_comes_back_down():
     """Two properties in one fresh process, because both are about history.
 
-    First, the mark responds to real use: writing a 200 MB array moves it by
-    about 200 MB. Touched, not merely allocated -- RSS counts pages the process
-    has written.
+    First, the mark responds to real use: writing a large array moves it by
+    about the size of the array. Touched, not merely allocated -- RSS counts
+    pages the process has written.
 
     Second, and this is the one that shapes `experiments/cost_scaling.py`: the
     mark does not come back down when the array is freed. A second, smaller
     workload in the same process is therefore unmeasurable, which is why the
-    sweep runs one subprocess per cell rather than a loop. Measured in a fresh
-    interpreter because a test that asserts "the peak just went up" is
-    otherwise at the mercy of whatever the rest of the suite allocated first.
+    sweep runs one subprocess per cell rather than a loop.
+
+    The probe is sized *against the mark it has to beat* rather than fixed,
+    which is not fussiness: this test first ran with a 200 MB array and passed
+    locally (a fresh interpreter there peaks at 27 MB) while failing on CI,
+    where importing NumPy leaves a 490 MB high-water mark and a 200 MB write is
+    invisible underneath it. That is the same effect the test is about, arriving
+    one level up.
     """
     script = """
 import numpy as np
 from gp.bench import max_rss
 mb = 1e6
 before = max_rss()
-block = np.ones((5000, 5000))          # 200 MB, fully written
+want = 0.6 * before + 200e6            # comfortably clear of the existing mark
+n = int((want / 8) ** 0.5)
+block = np.ones((n, n))                # 8 n^2 bytes, fully written
 after = max_rss()
 del block
 small = np.ones((100, 100))            # 80 KB
 small += 1.0
-print(before / mb, after / mb, max_rss() / mb)
+print(before / mb, after / mb, max_rss() / mb, 8 * n * n / mb)
 """
     out = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, check=True,
         cwd=str(pathlib.Path(__file__).resolve().parents[1]),
     )
-    before, after, after_free = (float(v) for v in out.stdout.split())
-    assert after - before > 150            # the 200 MB write shows up
+    before, after, after_free, written = (float(v) for v in out.stdout.split())
+    assert after - before > 0.5 * written  # the write shows up in the mark
     assert after_free >= after             # and never comes back down
 
 

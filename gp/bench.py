@@ -180,6 +180,16 @@ def max_rss() -> float:
     process share one number, and the second can only be measured as an
     increment over the first if it allocates more than the first ever did --
     which is why the sweep in `experiments/cost_scaling.py` forks per cell.
+
+    That also sets a floor on what this can measure at all. Starting the
+    interpreter and importing NumPy is itself a workload, and its mark is the
+    one every later measurement has to clear: about 27 MB on the machine the
+    committed figures come from, and about 490 MB on the GitHub runner, where
+    the BLAS reserves far more up front. Any cell whose own footprint is below
+    that floor reports a delta near zero -- not because it used no memory, but
+    because it never touched more than the interpreter already had. Traced
+    NumPy bytes have no such floor, which is the other reason both are
+    reported.
     """
     return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * _RSS_UNIT
 
