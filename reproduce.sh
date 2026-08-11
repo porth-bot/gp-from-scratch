@@ -74,6 +74,7 @@ step "10. ML-II multimodality and multi-start"          experiments/multistart.p
 step "11. random Fourier features (rate, speed, gaps)"  experiments/rff.py
 step "12. sparse GPs: joint ML-II over Z, convergence"  experiments/sparse.py
 step "13. FITC vs VFE: the noise it hides in Lambda"    experiments/fitc.py
+step "14. features vs inducing points, same gap"        experiments/rff_vs_sparse.py
 
 echo
 echo "=================================================================="
@@ -87,7 +88,7 @@ echo "=================================================================="
 # wall-clock) or real drift between the code and what the repo ships -- which is
 # how figures/co2_forecast.png and figures/ntk_linearization.png sat stale, an
 # older environment's bytes, until someone rebuilt them from a clean clone.
-TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png"
+TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png figures/rff_vs_sparse.png"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     changed=$(git status --porcelain -- figures/ | awk '{print $2}')
     unexpected=""

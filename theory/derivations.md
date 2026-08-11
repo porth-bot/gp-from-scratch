@@ -909,7 +909,8 @@ The middle term is the drop from conditioning on `u`; the last adds back the
 uncertainty *in* `u`. Far from every inducing point the two middle-and-last
 terms cancel and the variance returns to the prior `k(x*, x*)` — the property
 random Fourier features lose (Sec. 8.5), and the reason to expect sparse GPs to
-keep their error bars in a gap.
+keep their error bars in a gap. "Far from every inducing point" is load-bearing
+in that sentence, and Sec. 9.8 measures what happens when it fails.
 
 **Numerics.** No inverse is formed and nothing bigger than `M x M` is
 factorized. With `Luu = chol(Kuu + jitter I)` and
@@ -1218,7 +1219,55 @@ that its `sigma^2` is not the data's noise level and its error bars are not the
 exact GP's, so the two should not be read as if they were. `gp/sparse.py`
 implements it to be measured, not recommended.
 
-### 9.8 What is deliberately not here yet
+### 9.8 When the band does *not* relax: DTC's overconfidence
+
+Sec. 9.5 read (9.10) as a safety property — far from every inducing point the
+two corrections cancel and the variance returns to the prior. The converse is
+the part that matters in practice, and it is not a caveat but a measured
+failure (`experiments/rff_vs_sparse.py`, measurement 4).
+
+Split (9.10) into the two things it is made of:
+
+```
+var(x*) = [ k** - Q** ]  +  [ K*u Sig^{-1} Ku* ],      Q** = K*u Kuu^{-1} Ku*.  (9.27)
+```
+
+The first bracket is a *margin*: the prior variance at `x*` that the inducing
+set cannot explain, which is `>= 0` and is large exactly when `x*` is far from
+every `z`. The second is the posterior variance of the inducing values,
+read out at `x*`. The margin is what makes the band relax; the second bracket
+is what the model actually claims to know.
+
+Now put an inducing point inside an empty region. Then `Q** -> k**`, the margin
+goes to zero, and the whole error bar is inherited from the second bracket —
+and that bracket is *not* the exact GP's posterior over `f(z)`. Under the
+variational family of Sec. 9.2, `p(f | u)` is kept exact, but the resulting
+`q(u)` in (9.9) has precision `Kuu^{-1} + sigma^{-2} Kuu^{-1} Kuf Kfu Kuu^{-1}`:
+every one of the `n` observations contributes to pinning down `M` numbers,
+weighted by `k(z, x_i)^2 / sigma^2`, whether or not any single `x_i` is near
+`z`. With `n` large and `sigma^2` small, a `z` that no datum is close to can
+still be over-determined by the crowd of data that is merely *nearby*. The
+exact GP conditions `f(x*)` on the data directly and makes no such claim.
+
+Measured, at the gap centre of the Sec. 11 setting (`n = 3000`, no data in
+`|x| < 1.2`, exact posterior sd `0.9655`, `M = 12`):
+
+| `Z` rule | nearest `z` | `k** - Q**` | `K*u Sig^-1 Ku*` | sd |
+|---|---|---|---|---|
+| data quantiles | `-1.424` | 0.9991 | 0.0000 | 0.9996 |
+| blind uniform grid | `+0.364` | 0.0931 | 0.0446 | 0.3710 |
+
+Same data, same `M`, same kernel; the second is overconfident by 2.6x because
+it spent its margin. So "inducing points keep the error bar" is a statement
+about `k** - Q**`, not about inducing points — and a placement rule that
+follows the *data* (quantiles, a random subset of `X`) preserves it for free,
+while one that follows the *domain* does not. This is also the sense in which
+(9.10) is the DTC predictive rather than the exact posterior: the variational
+argument of Sec. 9.2 bounds the marginal likelihood, and says nothing about the
+predictive distribution being conservative pointwise. It is not.
+`test_an_isolated_inducing_point_in_a_gap_is_overconfident` pins it.
+
+### 9.9 What is deliberately not here yet
 
 - **SVGP** (Hensman et al. 2013) keeps `q(u)` uncollapsed so the bound
   decomposes over data points and can be minibatched, and admits non-Gaussian
@@ -1618,4 +1667,4 @@ consequence.
   each do to the fitted noise and the predictive variance; the claim
   `experiments/fitc.py` tests.)
 - J. Hensman, N. Fusi, and N. D. Lawrence, "Gaussian Processes for Big Data,"
-  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.8.)
+  *UAI* 2013. (SVGP: the uncollapsed bound that minibatches, Sec. 9.9.)

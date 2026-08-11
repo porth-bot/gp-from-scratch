@@ -507,7 +507,8 @@ both found by re-measuring it against a second approximation:
   99% of the honest one, is 22× worse in the gap than on the data. What fails
   in the gap is the *posterior*, not just its second moment.
 
-Raising $D$ is the only fix within RFF.
+Raising $D$ is the only fix within RFF. §11 spends the same rank budget the
+other way and does not have to.
 
 <p align="center"><img src="figures/rff.png" width="960"></p>
 
@@ -515,6 +516,84 @@ One consequence worth stating plainly: `RFFMap` exposes no gradients, so ML-II
 cannot be run through it as written — the frequencies are drawn *from* a
 density that depends on $\ell$. Fit the exact GP's hyperparameters first (on a
 subset if $n$ is large), then build the map at those values.
+
+### 11. Two ways to spend a rank budget (`experiments/rff_vs_sparse.py`)
+
+§10 replaced the *kernel* with a randomized finite-rank surrogate. The other
+route keeps the model and approximates the *posterior*, summarizing $f$ through
+$M$ inducing variables $u = f(Z)$ (Titsias 2009; derived in
+[`theory/derivations.md`](theory/derivations.md) §9, implemented in
+[`gp/sparse.py`](gp/sparse.py)). Augmenting with $u$ changes nothing — it is the
+same GP at $M$ more inputs — so with $q(u)$ collapsed to its optimum the
+evidence lower bound is
+
+$$F = \log \mathcal N(y \mid 0,\, Q_{ff} + \sigma^2 I) - \tfrac{1}{2\sigma^2}\operatorname{tr}(K_{ff} - Q_{ff}), \qquad Q_{ff} = K_{fu}K_{uu}^{-1}K_{uf},$$
+
+with the trace term the penalty for an inducing set that fails to explain $f$.
+Both methods are rank-$R$ and both cost $O(nR^2)$. They differ in **where the
+rank goes**: RFF picks $R$ global sinusoids from the spectral density before
+seeing the data; SGPR picks $R$ local basis functions $k(\cdot, z_m)$ sited on
+the input space.
+
+So run them in the same gap. The setup is *imported* from `rff.py` rather than
+restated — same target, same $n = 3000$, same gap in $\lvert x\rvert < 1.2$,
+same kernel hyperparameters in every arm, 5 datasets × 9 feature draws. **$Z$ is
+never optimized**: it is placed at the data quantiles and left alone, so nothing
+below is a tuned method beating an untuned one.
+
+**Posterior sd at the gap centre** (exact GP: **0.9655**):
+
+| rank $R$ | RFF, median [min, max] | SGPR, quantile $Z$ | SGPR, blind grid $Z$ |
+|---|---|---|---|
+| 16 | 0.072 &nbsp;[0.011, 0.232] | 0.998 | 0.840 |
+| 32 | 0.100 &nbsp;[0.061, 0.529] | 0.969 | 0.966 |
+| 64 | 0.504 &nbsp;[0.086, 0.637] | **0.9656** | 0.9655 |
+| 256 | 0.765 &nbsp;[0.608, 0.952] | 0.9655 | 0.9655 |
+| 2048 | 0.954 &nbsp;[0.919, 0.962] | 0.9655 | 0.9655 |
+
+**Matched rank is not matched cost, and the two disagree.** Per unit of rank
+RFF is *cheaper* — 2.4× at $R = 2048$, up to 25× at small $R$ — because SGPR
+pays $nM$ kernel evaluations and two triangular solves where RFF pays one
+matrix product. Judge instead by the cost to reach a fixed accuracy, and
+require accuracy in **both moments**: the error bar within 5% of exact *and*
+the posterior mean within 5% of the signal's span everywhere.
+
+| | error bar only | mean only | both | cost |
+|---|---|---|---|---|
+| RFF | $R = 1024$ | never | **never** | — |
+| SGPR, quantile $Z$ | $R = 4$ | $R = 32$ | **$R = 32$** | 0.0043 s = 0.9% of the exact GP |
+
+RFF never gets there at any rank in the sweep: its in-gap mean error is still
+0.201 at $R = 2048$, having fallen only 3.1× over a 32× rank increase, while
+its error outside the gap is 0.006. Both halves of the criterion are load-
+bearing, and the reason is in the SGPR row: at $R = 4$ SGPR reports the gap sd
+as 1.0000, inside 5% of exact — but only because $Q_{**}\approx 0$ there, so it
+has returned the *prior*. It is right about the error bar the way a model that
+knows nothing is right, and its mean is off by 1.35. Scoring the error bar
+alone would reward whichever method degrades toward the prior fastest.
+
+**The counterweight: this is a result about placement, not about inducing
+points.** Swap the data quantiles for a blind uniform grid over the domain and
+SGPR loses the error bar too — sd **0.371** at $M = 12$ against the exact
+0.9655, a 2.6× overconfidence, with a worst deficit of $-0.66$ across the grid.
+The mechanism is in the decomposition
+$\mathrm{var}(x_*) = [k_{**} - Q_{**}] + [K_{*u}\Sigma^{-1}K_{u*}]$ (§9.8): the
+first bracket is a *margin* that only exists where $x_*$ is far from every $z$.
+A grid puts an inducing point at $x = 0.364$, inside the empty region, which
+spends the margin — 0.093 there against 0.999 for quantile $Z$ — and hands the
+band to a $q(u)$ that the data *outside* the gap has over-determined.
+
+| $Z$ rule | nearest $z$ | margin $k_{**}-Q_{**}$ | $K_{*u}\Sigma^{-1}K_{u*}$ | sd |
+|---|---|---|---|---|
+| data quantiles | $-1.424$ | 0.9991 | 0.0000 | 0.9996 |
+| blind uniform grid | $+0.364$ | 0.0931 | 0.0446 | 0.3710 |
+
+RFF is still worse than the blind grid at every matched rank, which is the
+honest bound on how far this reaches. The usable summary: a placement rule that
+follows the *data* — quantiles, or a random subset of $X$ — keeps the error bar
+for free, and one that follows the *domain* does not.
+
+<p align="center"><img src="figures/rff_vs_sparse.png" width="960"></p>
 
 ## Reproduce
 
@@ -609,9 +688,12 @@ monthly record), is committed, so there is nothing to download.
 - **Exact inference is still $O(n^3)$.** Random Fourier features (§10) lift the
   ceiling — 252× at $n=8000$ — but they buy accuracy at the Monte Carlo rate and
   starve the predictive variance once $n \gg D$, so they are a *mean*
-  accelerator, not a drop-in replacement. The principled alternative for
-  calibrated uncertainty at scale is inducing points (Titsias 2009, SVGP), which
-  is not implemented here.
+  accelerator, not a drop-in replacement. Inducing points (§11, Titsias 2009)
+  are the alternative that keeps the error bar, and on the gap benchmark they
+  reach a fixed accuracy in both moments at rank 32 where RFF does not reach it
+  at 2048 — but they carry their own failure mode (a $z$ in an empty region is
+  overconfident, §9.8), and the collapsed bound still needs all of $y$ at once.
+  Minibatched SVGP and non-Gaussian likelihoods are not implemented here.
 - **RFF hyperparameters are not learned.** The feature map has no gradients, so
   ML-II has to be run on an exact GP (or a subset) first and the map built at
   those values; §8.6 of the theory doc sketches the reparameterization that
