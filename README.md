@@ -477,12 +477,37 @@ separate (fit + predict, same machine, $D = 512$):
 
 **What breaks — variance starvation.** A rank-$D$ model has $D$ degrees of
 freedom in total. Once $n \gg D$ the data pins essentially all of them and the
-posterior variance collapses *everywhere*, including where an exact GP
-correctly widens. With $n = 3000$ and a gap in $\lvert x\rvert < 1.2$, the
-exact posterior sd at the gap centre is **0.97**; $D = 2048$ gives 0.94;
-$D = 64$ gives **0.088** — a tenth of the honest uncertainty, in the one place
-uncertainty was the reason to use a GP (Wang et al. 2018). The mean is still
-fine there; the error bar is not. Raising $D$ is the only fix within RFF.
+posterior variance collapses where an exact GP correctly widens. With
+$n = 3000$ and a gap in $\lvert x\rvert < 1.2$, the exact posterior sd at the
+gap centre is **0.97**, and RFF loses roughly half of it at $D = 64$
+(Wang et al. 2018):
+
+| | sd at the gap centre, median of 9 feature draws | range over the draws | max mean error *in the gap* | …*where the data are* |
+|---|---|---|---|---|
+| exact GP | 0.97 | — | — | — |
+| $D = 2048$ | 0.954 &nbsp;(0.99×) | [0.922, 0.960] | 0.129 | 0.006 |
+| $D = 64$ | 0.505 &nbsp;(0.52×) | **[0.088, 0.635]** | 0.527 | 0.009 |
+
+Two things in that table are corrections to what this section used to claim,
+both found by re-measuring it against a second approximation:
+
+- **The error bar.** This section previously reported $D = 64$ giving **0.088**,
+  a tenth of the honest uncertainty. That is a real fit, but it is
+  `default_rng(0)` — and across nine draws of the feature map it is the *worst*
+  of the nine, against a median of 0.505. At $D = 64$ the frequencies are few
+  enough that which ones come up matters more than $D$ does: the spread runs
+  7×, while at $D = 2048$ the same nine draws span only 0.922–0.960. The
+  qualitative claim survives and the digits did not — even the best draw is 34%
+  below exact, and no draw is close.
+- **The mean.** This section previously said "the mean is still fine there".
+  It is not: split by region, the median $D = 64$ draw is off by **0.527** in
+  the gap and 0.009 where the data are, a 56× difference against a posterior
+  mean spanning $\pm1.5$. The whole-domain max in the table above hid it,
+  because 70% of the domain has data in it. Even $D = 2048$, whose error bar is
+  99% of the honest one, is 22× worse in the gap than on the data. What fails
+  in the gap is the *posterior*, not just its second moment.
+
+Raising $D$ is the only fix within RFF.
 
 <p align="center"><img src="figures/rff.png" width="960"></p>
 

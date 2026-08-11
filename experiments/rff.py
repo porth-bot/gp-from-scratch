@@ -132,14 +132,33 @@ def timing_vs_n(ns, D=512, repeats=3):
 
 
 def starvation(n=3000, gap=1.2):
+    """Posterior across a gap, over ``N_SEEDS`` draws of the feature map.
+
+    One draw is not a measurement here. The frequencies are random, and at
+    D = 64 how much error bar survives depends heavily on which eight-ish
+    frequencies happened to come up: across nine draws the posterior sd at the
+    gap centre spans 0.088 to 0.635. This function therefore fits every draw
+    and returns the whole spread, plus the *median* draw for plotting -- the
+    figure used to show ``default_rng(0)``, which turned out to be the worst of
+    the nine, so the number the README quoted was a tail and not a typical fit.
+    The qualitative claim survives (even the best draw is 34% below exact); the
+    headline digits did not.
+    """
     rng = np.random.default_rng(2)
     X, y = dataset(n, rng, gap=gap)
     Xs = np.linspace(-4, 4, 400).reshape(-1, 1)
     exact = GPRegressor(RBF(s2=S2, l=LENGTHSCALE), noise_var=NOISE_VAR).fit(X, y)
-    out = {"X": X, "y": y, "Xs": Xs, "exact": exact.predict(Xs)}
+    out = {"X": X, "y": y, "Xs": Xs, "gap": gap, "exact": exact.predict(Xs)}
+    centre = int(np.argmin(np.abs(Xs.ravel())))
     for D in (64, 2048):
-        phi = RFFMap(D, LENGTHSCALE, S2, 1, np.random.default_rng(0))
-        out[D] = RFFRegressor(phi, noise_var=NOISE_VAR).fit(X, y).predict(Xs)
+        draws = []
+        for seed in range(N_SEEDS):
+            phi = RFFMap(D, LENGTHSCALE, S2, 1, np.random.default_rng(seed))
+            draws.append(RFFRegressor(phi, noise_var=NOISE_VAR).fit(X, y).predict(Xs))
+        sds = np.array([np.sqrt(v[centre]) for _, v in draws])
+        out[D] = draws[int(np.argsort(sds)[len(sds) // 2])]      # median draw
+        out[(D, "sd_spread")] = (float(np.median(sds)), float(sds.min()),
+                                 float(sds.max()))
     return out
 
 
@@ -169,12 +188,26 @@ def main():
     print("\n4. variance starvation across a gap in the data")
     star = starvation()
     Xs = star["Xs"]
-    centre = int(np.argmin(np.abs(Xs.ravel())))
-    sd_exact = np.sqrt(star["exact"][1][centre])
+    xs = Xs.ravel()
+    in_gap = np.abs(xs) < star["gap"]
+    centre = int(np.argmin(np.abs(xs)))
+    mean_exact, var_exact = star["exact"]
+    sd_exact = np.sqrt(var_exact[centre])
     print(f"    exact GP posterior sd at the gap centre: {sd_exact:.3f}")
     for D in (64, 2048):
-        sd = np.sqrt(star[D][1][centre])
-        print(f"    RFF D={D:5d}: {sd:.3f}   ({sd / sd_exact:.2f}x the exact sd)")
+        med, lo, hi = star[(D, "sd_spread")]
+        print(f"    RFF D={D:5d}: sd at the centre, median of {N_SEEDS} draws "
+              f"{med:.3f} [{lo:.3f}, {hi:.3f}]   "
+              f"({med / sd_exact:.2f}x the exact sd)")
+    # Is the mean "still fine" in the gap? Split the error by region rather
+    # than reporting one max over the whole domain, which is dominated by the
+    # 70% of it that has data in it and hides the answer.
+    print("    max |mean_D - mean_exact|, split by region (median draw):")
+    for D in (64, 2048):
+        err = np.abs(star[D][0] - mean_exact)
+        print(f"    RFF D={D:5d}: in the gap {err[in_gap].max():.3f}   "
+              f"where the data are {err[~in_gap].max():.3f}   "
+              f"(ratio {err[in_gap].max() / err[~in_gap].max():.0f}x)")
 
     # ---- figure -------------------------------------------------------------
     fig, axes = plt.subplots(2, 2, figsize=(9.6, 7.0), constrained_layout=True)
@@ -229,9 +262,12 @@ def main():
         ax.fill_between(xs, mean - 1.96 * sd, mean + 1.96 * sd,
                         color=color, alpha=0.16, lw=0)
         ax.plot(xs, mean, color=color, lw=1.4, ls=ls, label=label, zorder=3)
-    ax.annotate(f"posterior sd at $x=0$:\nexact {sd_exact:.2f}   "
-                f"$D$=2048 {np.sqrt(star[2048][1][centre]):.2f}   "
-                f"$D$=64 {np.sqrt(star[64][1][centre]):.2f}",
+    m64, lo64, hi64 = star[(64, "sd_spread")]
+    m2k, lo2k, hi2k = star[(2048, "sd_spread")]
+    ax.annotate(f"posterior sd at $x=0$, median of {N_SEEDS} feature draws:\n"
+                f"exact {sd_exact:.2f}   "
+                f"$D$=2048 {m2k:.2f} [{lo2k:.2f}, {hi2k:.2f}]   "
+                f"$D$=64 {m64:.2f} [{lo64:.2f}, {hi64:.2f}]",
                 xy=(0.5, 0.03), xycoords="axes fraction", ha="center",
                 fontsize=7.5, color="0.25")
     ax.set_xlabel("x")
