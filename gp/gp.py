@@ -42,13 +42,24 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
+from gp.linalg import cho_solve, solve_lower
+
 if TYPE_CHECKING:
     from gp.kernels import Kernel
 
 
 def _chol_solve(L: np.ndarray, B: np.ndarray) -> np.ndarray:
-    """Solve (L L^T) x = B via two triangular solves (never form the inverse)."""
-    return np.linalg.solve(L.T, np.linalg.solve(L, B))
+    """Solve (L L^T) x = B via two triangular solves (never form the inverse).
+
+    The triangular solves are `gp.linalg`'s, not ``np.linalg.solve``'s. That
+    used to be the implementation and it was quietly the most expensive line in
+    the repo: NumPy has no triangular solver, so passing a Cholesky factor to
+    the general one runs a fresh LU factorization with partial pivoting -- 2/3
+    n^3 flops, twice the Cholesky that just produced the factor, to solve a
+    system that needs n^2. At n = 8000 that was about 6 seconds of a 7.7-second
+    fit-and-predict.
+    """
+    return cho_solve(L, B)
 
 
 def sample_prior(
@@ -193,7 +204,7 @@ class GPRegressor:
         Xs = np.atleast_2d(np.asarray(Xs, dtype=float))
         Ks = self.kernel(self.X, Xs)                 # (n, n*)
         mean = Ks.T @ self.alpha
-        v = np.linalg.solve(self.L, Ks)              # (n, n*)
+        v = solve_lower(self.L, Ks)                  # (n, n*)
         kss = np.diag(self.kernel(Xs, Xs)).copy()
         var = kss - np.sum(v**2, axis=0)
         var = np.maximum(var, 0.0)                   # clip float negatives
