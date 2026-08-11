@@ -109,6 +109,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from gp.linalg import cho_solve, solve_lower, solve_upper
+
 if TYPE_CHECKING:
     from gp.kernels import Kernel
 
@@ -360,7 +362,7 @@ class SGPR:
         Kuu = Kuu + self.jitter * float(np.mean(np.diag(Kuu))) * np.eye(M)
 
         self.L_uu = np.linalg.cholesky(Kuu)
-        self.A = np.linalg.solve(self.L_uu, Kuf)                # (M, n), Qff = A^T A
+        self.A = solve_lower(self.L_uu, Kuf)                    # (M, n), Qff = A^T A
 
         # Lambda_i = k(x_i, x_i) - q(x_i, x_i), the shortfall at each datum.
         # Clipped at 0: each entry is the posterior variance of f(x_i) given u
@@ -374,7 +376,7 @@ class SGPR:
         AD = self.A / self.D                                    # (M, n)
         B = np.eye(M) + AD @ self.A.T
         self.L_B = np.linalg.cholesky(B)
-        self.c = np.linalg.solve(self.L_B, AD @ self.y)         # (M,)
+        self.c = solve_lower(self.L_B, AD @ self.y)             # (M,)
 
         self._trace_term = float(np.sum(self._lam))
         self._n = n
@@ -518,8 +520,8 @@ class SGPR:
         assert self._fitted
         A, L_B, D = self.A, self.L_B, self.D
 
-        alpha = (self.y - A.T @ np.linalg.solve(L_B.T, self.c)) / D      # (n,)
-        BinvA = np.linalg.solve(L_B.T, np.linalg.solve(L_B, A))          # (M, n)
+        alpha = (self.y - A.T @ solve_upper(L_B.T, self.c)) / D          # (n,)
+        BinvA = cho_solve(L_B, A)                                        # (M, n)
 
         # diag(W^-1) and its trace, by the same identity, without forming W^-1.
         diag_W_inv = (1.0 - np.sum(A * BinvA, axis=0) / D) / D           # (n,)
@@ -530,10 +532,10 @@ class SGPR:
         else:
             v = np.full(self._n, 1.0 / self.noise_var)
 
-        PH = np.linalg.solve(
+        PH = solve_upper(
             self.L_uu.T, np.outer(A @ alpha, alpha) - BinvA / D + A * v
         )                                                                # (M, n)
-        P = np.linalg.solve(self.L_uu.T, A)                              # (M, n)
+        P = solve_upper(self.L_uu.T, A)                                  # (M, n)
         S = PH @ P.T
         S = 0.5 * (S + S.T)
         return PH, S, alpha, tr_W_inv, v
@@ -653,8 +655,8 @@ class SGPR:
         assert self._fitted
         Xs = np.atleast_2d(np.asarray(Xs, dtype=float))
         Kus = self.kernel(self.Z, Xs)                            # (M, n*)
-        As = np.linalg.solve(self.L_uu, Kus)                     # (M, n*)
-        tmp = np.linalg.solve(self.L_B, As)                      # (M, n*)
+        As = solve_lower(self.L_uu, Kus)                         # (M, n*)
+        tmp = solve_lower(self.L_B, As)                          # (M, n*)
 
         mean = tmp.T @ self.c
         kss = kernel_diag(self.kernel, Xs)

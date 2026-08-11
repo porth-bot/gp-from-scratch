@@ -75,6 +75,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from gp.linalg import cho_solve, solve_lower
+
 
 class RFFMap:
     """Random Fourier feature map for the (isotropic or ARD) RBF kernel.
@@ -225,7 +227,7 @@ class RFFRegressor:
         D = Z.shape[1]
         A = Z.T @ Z + self.noise_var * np.eye(D)
         self.L = np.linalg.cholesky(A)
-        self.w_mean = np.linalg.solve(self.L.T, np.linalg.solve(self.L, Z.T @ self.y))
+        self.w_mean = cho_solve(self.L, Z.T @ self.y)
         self._fitted = True
         return self
 
@@ -235,7 +237,7 @@ class RFFRegressor:
         assert self._fitted
         Zs = self.feature_map.transform(Xs)                          # (n*, D)
         mean = Zs @ self.w_mean
-        v = np.linalg.solve(self.L, Zs.T)                            # (D, n*)
+        v = solve_lower(self.L, Zs.T)                                # (D, n*)
         var = self.noise_var * np.sum(v**2, axis=0)
         var = np.maximum(var, 0.0)
         if include_noise:
