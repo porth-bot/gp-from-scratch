@@ -63,7 +63,7 @@ step "static type check (mypy, gp/)"      -m mypy
 
 step "1. kernel prior gallery"                          experiments/prior_samples.py
 step "2. exact-GP validation (calibration, recovery)"   experiments/validate.py
-step "3. Mauna Loa CO2 (ML-II, 9 free params, twice)"   experiments/co2.py
+step "3. Mauna Loa CO2 (ML-II x4: base, +RQ, control)"  experiments/co2.py
 step "4. NNGP / NTK correspondence"                     experiments/ntk_experiments.py
 step "5. parity + speed vs scikit-learn"                experiments/sklearn_parity.py
 step "6. two-stage heteroscedastic noise"               experiments/heteroscedastic.py

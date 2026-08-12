@@ -349,6 +349,109 @@ def test_co2_data_path_is_independent_of_working_directory(tmp_path, monkeypatch
     assert (np.diff(t) > 0).all()   # monthly series, monotone in time
 
 
+def test_co2_medium_term_variants_differ_only_in_the_medium_slot():
+    """The RQ-vs-RBF comparison in the CO2 experiment is a control only if the
+    two composites are identical everywhere except the medium-term slot.
+
+    That is checked structurally rather than by reading the source, because it
+    is the claim the section's conclusion rests on: since an ordinary RBF in
+    that slot reproduces RationalQuadratic's hold-out RMSE to within 1%, the
+    fix is "a medium-term component at all" and not "a heavy tail" -- and that
+    reading collapses if the two kernels also differ somewhere else.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from co2 import make_kernel
+
+    base, rq, rbf = make_kernel(), make_kernel("rq"), make_kernel("rbf")
+    # 8 free (the period is frozen), +3 for RQ's (s2, l, alpha), +2 for RBF's.
+    assert (base.n_params, rq.n_params, rbf.n_params) == (8, 11, 10)
+
+    # theta is laid out in composition order, so trend (2) + seasonal (4) leads
+    # and the short-term Matern (2) trails; the medium term is the slice between.
+    for k in (rq, rbf):
+        np.testing.assert_allclose(k.theta[:6], base.theta[:6])
+        np.testing.assert_allclose(k.theta[-2:], base.theta[-2:])
+    np.testing.assert_allclose(rq.theta[6:8], rbf.theta[6:8])  # shared s2, l init
+    assert rq.theta.size - rbf.theta.size == 1                 # RQ's alpha, and only that
+
+    with pytest.raises(ValueError):
+        make_kernel("matern")
+
+
+def test_co2_medium_terms_differ_where_the_evidence_can_see_it():
+    """The control reproduces RQ's hold-out RMSE to 1%, which invites the
+    reading that the two medium terms are interchangeable. They are not, and
+    the difference is in the tail: the evidence prefers RQ by 6.6 nats, and
+    this is the property it is paying for.
+
+    At the shared init, on the lag where the two part company.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from co2 import make_kernel
+
+    # The two composites are identical except in that slot (asserted above), so
+    # subtracting them isolates the medium terms without reaching inside the tree.
+    rq, rbf = make_kernel("rq"), make_kernel("rbf")
+    x0 = np.zeros((1, 1))
+
+    def medium_gap(lag):
+        xl = np.array([[float(lag)]])
+        return float(rq(x0, xl)[0, 0] - rbf(x0, xl)[0, 0])
+
+    assert medium_gap(0.0) == pytest.approx(0.0, abs=1e-12)  # same variance at zero lag
+    for lag in (1.0, 5.0, 20.0):
+        assert medium_gap(lag) > 0, lag   # the mixture sits above the single scale
+
+    # At 20 years the RBF medium term has decayed to nothing (exp(-139)), so the
+    # gap IS RQ's remaining covariance: 0.66 * (1 + 400/(2*0.78*1.44))^-0.78.
+    tail = medium_gap(20.0)
+    assert tail == pytest.approx(0.66 * (1 + 400 / (2 * 0.78 * 1.44)) ** -0.78, rel=1e-9)
+    assert tail / 0.66 > 0.015                        # >1.5% of its own variance
+
+
+def test_co2_rq_composite_lml_gradient_matches_finite_differences():
+    """ML-II on the CO2 series now follows the gradient of a 12-parameter tree
+    (Sum of RBF, Product, RationalQuadratic, Matern) that nothing else in the
+    suite exercises. Check it on the actual data, thinned, rather than on a
+    synthetic stand-in: the real series is what makes the trend block badly
+    scaled (s2 ~ 2500 against a short-term 0.5), and a gradient that is right
+    on well-conditioned toy data is not the claim being made.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from co2 import load_co2, make_kernel
+
+    t, ppm = load_co2()
+    X, y = t[::12][:, None], ppm[::12]           # one month a year, n ~ 68
+    y = y - y.mean()
+
+    model = GPRegressor(make_kernel("rq"), noise_var=0.05)
+    p0 = model.params
+    assert p0.size == 12                          # 11 kernel + noise
+    _, analytic = model.lml_and_grad(X, y, p0)
+
+    eps = 1e-6
+    numeric = np.empty_like(p0)
+    for i in range(p0.size):
+        pp, pm = p0.copy(), p0.copy()
+        pp[i] += eps
+        pm[i] -= eps
+        numeric[i] = (model.lml_and_grad(X, y, pp)[0]
+                      - model.lml_and_grad(X, y, pm)[0]) / (2 * eps)
+    # Relative to the largest entry: the trend blocks carry gradients ~1e2
+    # while the RQ alpha's is ~1e-1, so a shared atol would be meaningless.
+    scale = np.abs(analytic).max()
+    np.testing.assert_allclose(analytic, numeric, rtol=1e-4, atol=1e-6 * scale)
+
+
 def test_heteroscedastic_noise_wrong_shape_raises():
     rng = np.random.default_rng(0)
     X, y = make_data(rng, n=20)

@@ -14,11 +14,11 @@ GP limit as width grows.
 ![co2](figures/co2_forecast.png)
 
 *Mauna Loa CO₂, 819 monthly means (1958–2026), fit with a hand-composed
-kernel — RBF trend + (Periodic × RBF) drifting seasonality + Matérn-3/2
-short-term — whose nine free hyperparameters are set by maximizing the
-evidence. The seasonal period is frozen at exactly 1 year (known physics; it
-also removes a gradient instability). The forecast to 2040 keeps the seasons
-because the kernel says the correlation is exactly periodic.*
+kernel — RBF trend + (Periodic × RBF) drifting seasonality + RationalQuadratic
+medium-term + Matérn-3/2 short-term — whose twelve free hyperparameters are set
+by maximizing the evidence. The seasonal period is frozen at exactly 1 year
+(known physics; it also removes a gradient instability). The forecast to 2040
+keeps the seasons because the kernel says the correlation is exactly periodic.*
 
 ## Problem
 
@@ -120,40 +120,67 @@ fit-vs-complexity tradeoff made visible.*
 
 The classic GP demonstration (Rasmussen & Williams 2006, §5.4.3): the kernel
 is *read off the physics* — a smooth rising trend, an annual cycle whose shape
-drifts slowly, and short-term correlated weather — because independent
-additive processes add their kernels:
+drifts slowly, medium-term irregularity belonging to no single scale, and
+short-term correlated weather — because independent additive processes add
+their kernels:
 
-$$k = \underbrace{\text{RBF}}_{\text{trend}} + \underbrace{\text{Periodic}\times\text{RBF}}_{\text{drifting season}} + \underbrace{\text{Matérn-}3/2}_{\text{short-term}} \;(+\ \sigma^2).$$
+$$k = \underbrace{\text{RBF}}_{\text{trend}} + \underbrace{\text{Periodic}\times\text{RBF}}_{\text{drifting season}} + \underbrace{\text{RationalQuadratic}}_{\text{medium-term}} + \underbrace{\text{Matérn-}3/2}_{\text{short-term}} \;(+\ \sigma^2).$$
 
 The seasonal **period is frozen at exactly 1 year** — known physics, and a
 numerical necessity: near a phase mismatch the periodic log-period gradient is
 $\sim\!10^3$ at init, which destabilized Adam and made an earlier free-period
 run diverge and fall back to its initialization. With the period pinned, the
-remaining nine hyperparameters optimize smoothly at `lr=0.01` over 800 steps,
-and the evidence improves monotonically:
-
-| | LML (init) | LML (best) | improvement |
-|---|---|---|---|
-| ML-II, 9 free params | −177.2 | −170.9 | **+6.3 nats** (monotonic) |
+remaining hyperparameters optimize smoothly at `lr=0.01` over 800 steps — and
+they are converged there, not merely stopped: the last quarter of the run is
+worth $+0.02$ nats or less in every arm below, and doubling to 2000 steps moves
+no hold-out RMSE by more than 0.001 ppm.
 
 **Honest out-of-sample evaluation.** Fit on data before 2015, forecast the
 held-out 2015–2026 months (11.4 years the model never sees):
 
-| model | held-out RMSE | 95% coverage | trend $\ell$ |
-|---|---|---|---|
-| hand-set init (no optimization) | **2.46 ppm** | 0.97 | 40 yr |
-| ML-II evidence optimum | 8.05 ppm | 0.09 | 21 yr |
+| model | LML: init → best | held-out RMSE | 95% coverage | trend $\ell$ |
+|---|---|---|---|---|
+| hand-set init (no optimization) | — | **2.46 ppm** | **0.97** | 40 yr |
+| ML-II, trend + season + short | −177.2 → −170.9 | 8.05 ppm | 0.09 | 21 yr |
+| ML-II, + RationalQuadratic | −184.8 → **−154.7** | 3.19 ppm | 0.32 | 107 yr |
+| ML-II, + RBF *(control)* | −184.7 → −161.3 | 3.22 ppm | 0.36 | 109 yr |
 
-The result worth reporting is the one that *isn't* clean: **ML-II raises the
-in-sample evidence but extrapolates worse here.** It prefers a shorter trend
-lengthscale (21 vs 40 yr) that captures in-sample wiggle; an RBF trend
-mean-reverts beyond its lengthscale, so the shorter one undershoots the
-continued rise over a decade. ML-II maximizes evidence, not multi-year
-forecast skill, and an RBF is a poor prior for an unbounded trend. The
-standard R&W remedy — a RationalQuadratic medium-term component (a scale
-mixture of RBFs with a heavier tail) — is now implemented in `gp/kernels.py`
-with its analytic log-space gradients; swapping it into the CO₂ composite is
-the next experiment. Reported as measured, not tuned to the held-out set.
+The result worth reporting is still the one that *isn't* clean: **ML-II raises
+the in-sample evidence and extrapolates worse.** On the three-term kernel it
+prefers a *shorter* trend lengthscale (21 yr against the hand-set 40) that
+captures in-sample wiggle, and an RBF trend mean-reverts beyond its
+lengthscale, so the shorter one undershoots a decade of continued rise.
+
+That diagnosis is a claim about mechanism, so it can be tested, and R&W's own
+CO₂ kernel supplies the test: it carries a fourth, medium-term term that this
+one lacked. Wire one in and the evidence's preference **reverses** — it now
+wants a trend of 107 yr, *longer* than the hand-set 40 — while the hold-out
+RMSE falls 2.5×, 8.05 → 3.19 ppm. The mean reversion was the mechanism, and it
+is now measured rather than argued.
+
+**But it is not RationalQuadratic's heavy tail that fixes it, which is what
+this experiment was run to show.** Put an ordinary RBF in the same slot with
+the same init and the hold-out lands at 3.22 ppm — 1% from RQ's 3.19, with the
+same 109-yr trend. What the model was missing was a medium-term component of
+*any* shape: something to absorb structure at a few years that was otherwise
+being paid for out of the trend's lengthscale. The scale mixture is not
+invisible — at a 20-year lag RQ still carries 1.7% of its variance where the
+RBF has none, and the **evidence can see exactly that**, preferring RQ by 6.6
+nats. The 11-year forecast cannot. Two model-selection criteria disagreeing
+about a difference one of them resolves and the other cannot even detect.
+
+**And none of it fixes the calibration.** The best ML-II fit covers 32% of
+held-out points inside its nominal 95% band, against the hand-set kernel's
+97%. The RMSE improved 2.5× and the error bars are still wrong by a factor. So
+the section's result stands with a sharper edge on it: ML-II maximizes
+evidence, not forecast skill, and the standard remedy closes about two-thirds
+of the RMSE gap and none of the coverage gap. Reported as measured, not tuned
+to the held-out set. (This closes
+[issue #2](https://github.com/porth-bot/gp-from-scratch/issues/2), which
+predicted only the first half of that.)
+
+The 2040 forecast at the top of this README uses the RationalQuadratic
+composite — the better model on both criteria that were actually measured.
 
 #### Building that kernel, step by step
 
@@ -171,7 +198,7 @@ need, both a consequence of what a kernel *is* (a covariance):
 Read the physics off the Mauna Loa curve and translate each clause:
 
 ```python
-from gp.kernels import RBF, Matern, Periodic
+from gp.kernels import RBF, Matern, Periodic, RationalQuadratic
 
 # 1. A smooth, decades-long rising trend. RBF, big amplitude (sd 50 ppm),
 #    long lengthscale (40 yr) so it is nearly constant across a few years.
@@ -182,10 +209,15 @@ trend    = RBF(s2=50.0**2, l=40.0)
 #    (l=90 yr) lets this year's cycle differ a little from a cycle decades away.
 seasonal = Periodic(s2=4.0, l=1.3, p=1.0, fixed=["p"]) * RBF(s2=1.0, l=90.0)
 
-# 3. Short-term correlated "weather". Matern-3/2, lengthscale ~1 yr, decays fast.
+# 3. Medium-term irregularity belonging to no one scale -- El Nino years and
+#    the like. RationalQuadratic is a Gamma mixture of RBFs, so alpha dials
+#    between "one lengthscale" (large) and "many" (small).
+medium   = RationalQuadratic(s2=0.66, l=1.2, alpha=0.78)
+
+# 4. Short-term correlated "weather". Matern-3/2, lengthscale ~1 yr, decays fast.
 short    = Matern(nu=1.5, s2=0.5, l=1.0)
 
-kernel = trend + seasonal + short           # a Sum of (RBF, Product, Matern)
+kernel = trend + seasonal + medium + short  # Sum of (RBF, Product, RQ, Matern)
 ```
 
 The tree carries its own free-parameter bookkeeping, so ML-II optimizes it
@@ -194,23 +226,28 @@ each child's `n_params`, and a `fixed=` parameter simply disappears from the
 count:
 
 ```python
->>> trend.n_params, seasonal.n_params, short.n_params   # Periodic's p is frozen
-(2, 4, 2)
->>> kernel.n_params                                     # 8 free (+ noise_var = 9)
-8
+>>> trend.n_params, seasonal.n_params, medium.n_params, short.n_params
+(2, 4, 3, 2)                                # Periodic's p is frozen
+>>> kernel.n_params                         # 11 free (+ noise_var = 12)
+11
 ```
 
 Every number in the composite has a reading you can check numerically. The
-prior variance at a point is the sum of the parts (`k(x,x) = 2500 + 4 + 0.5 =
-2504.5` ppm²). The `seasonal` term is worth watching because it is the product:
+prior variance at a point is the sum of the parts (`k(x,x) = 2500 + 4 + 0.66 +
+0.5 = 2505.16` ppm²). The `seasonal` term is worth watching because it is the
+product:
 at a **half-year** gap the annual cycle is in antiphase, so its covariance
 collapses (`4.0 → 1.22`); at a **full year** it is back in phase (`≈ 4.0`); and
 even **ten years** apart it is still `≈ 3.98`, because the RBF envelope
 ($\ell=90$ yr) has barely decayed — that is precisely "same-shaped season,
 drifting by a hair per decade." The `short` Matérn, by contrast, falls from
-`0.24` at one year to `0.017` at three: weather, not climate. Add them and you
-have a prior that already *looks like* the data before a single hyperparameter
-is optimized — which is why the hand-set kernel forecasts as well as it does (§2).
+`0.24` at one year to `0.017` at three: weather, not climate. And `medium` is
+the one to read at long lag, because that is the whole reason for a scale
+mixture — `0.66 → 0.50` at a year, `0.094` at five, and still `0.0115` at
+**twenty**, where an RBF with the same variance and lengthscale is at
+$e^{-139}$. Add them and you have a prior that already *looks like* the data
+before a single hyperparameter is optimized — which is why the hand-set kernel
+forecasts as well as it does (§2).
 
 ### 3. Wide networks *are* Gaussian processes (`experiments/ntk_experiments.py`)
 
@@ -854,12 +891,12 @@ first run.
 To run a single experiment instead (timings measured by `reproduce.sh`):
 
 ```bash
-pytest                          # 272 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 275 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
 python validate.py              # ~3 s
-python co2.py                   # ~2.5 min (ML-II on n~700, 9 free params, twice)
+python co2.py                   # ~3 min (four ML-II fits; --steps 2000 for the convergence check)
 python ntk_experiments.py       # ~5 s
 python sklearn_parity.py        # ~1 s  (parity + speed vs scikit-learn)
 python heteroscedastic.py       # ~1 s  (two-stage input-dependent noise)
@@ -938,10 +975,15 @@ monthly record), is committed, so there is nothing to download.
   ML-II has to be run on an exact GP (or a subset) first and the map built at
   those values; §8.6 of the theory doc sketches the reparameterization that
   would make the map differentiable in $\ell$.
-- **RBF trend mean-reverts**, which is why ML-II extrapolates the CO₂ series
-  poorly (above). The RationalQuadratic kernel — the standard fix — is now
-  implemented; wiring it into the CO₂ composite and re-measuring the hold-out
-  is the next step.
+- **ML-II still extrapolates the CO₂ series worse than the hand-set kernel**,
+  and the standard remedy only halves the problem. A medium-term term takes the
+  mean-reversion pressure off the trend and the hold-out RMSE falls 2.5×, but
+  the fit still covers 32% of held-out points in a nominal 95% band (§2), so
+  what is left is not a missing kernel component — it is that a stationary
+  covariance is the wrong prior for an unbounded trend, and that ML-II is
+  scoring the wrong thing for this task. The honest alternatives are a
+  non-stationary trend (a linear kernel, or a mean function) and selecting on
+  predictive score rather than evidence; neither is implemented here.
 - **Gaussian likelihood only:** classification (non-Gaussian likelihood) would
   need Laplace or EP, out of scope for this study.
 
