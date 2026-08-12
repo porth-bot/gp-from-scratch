@@ -99,23 +99,32 @@ def test_exact_fit_peak_is_a_small_multiple_of_the_gram_matrix():
     from gp.gp import GPRegressor
     from gp.kernels import RBF
 
-    def peak_copies(n):
+    def peak_bytes(n):
         rng = np.random.default_rng(0)
         X = rng.uniform(-3, 3, size=(n, 1))
         y = np.sin(X[:, 0])
         _, peak = traced_peak(lambda: GPRegressor(RBF(s2=1.0, l=0.8),
                                                   noise_var=0.1).fit(X, y))
-        return peak / (8 * n * n)
+        return peak
 
-    small, large = peak_copies(400), peak_copies(800)
+    # Solve for the quadratic coefficient from two sizes rather than reading a
+    # ratio off one. The peak is c * 8 n^2 + b, and b -- the vectors, the
+    # small temporaries, the interpreter's own churn -- is not negligible at
+    # these n: it is 4 KB on the pinned build and 80 KB on CI's, which is
+    # enough to put a single-size reading 3% above the integer and was enough
+    # to fail an earlier version of this test that compared two of them.
+    # Differencing cancels b exactly.
+    n = 400
+    small, large = peak_bytes(n), peak_bytes(2 * n)
+    copies = (large - small) / (8 * (4 * n * n - n * n))
+    offset = small - copies * 8 * n * n
 
-    # The law: doubling n quadruples the peak, so the copy count is flat in n.
-    assert large == pytest.approx(small, rel=0.02), (small, large)
-    # The constant: at least 2 (the matrix and its factor must both be live),
-    # never more than 3, and close to a whole number of copies either way.
-    for copies in (small, large):
-        assert 1.98 < copies < 3.05, copies
-        assert min(abs(copies - c) for c in (2, 3)) < 0.05, copies
+    # At least 2: the matrix and its factor must both be live at the peak.
+    # Never more than 3. And a whole number either way -- these are array
+    # allocations, so a fractional answer would mean the model is wrong.
+    assert 1.95 < copies < 3.05, copies
+    assert min(abs(copies - c) for c in (2, 3)) < 0.05, copies
+    assert 0 <= offset < 2e6, offset      # and what is left over is not n^2
 
 
 def test_traced_peak_sees_the_peak_not_the_survivor():
