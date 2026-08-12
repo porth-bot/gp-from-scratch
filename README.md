@@ -795,9 +795,20 @@ prints what is behind them rather than asserting constants:
   the asymptotic regime at the top, because the $O(n^2)$ kernel evaluation is
   still 22% of the fit at $n = 8000$. Cholesky does not overtake it until
   $n = 4000$.
-- The *RSS* exponent misses because RSS counts touched pages: it tracks the
-  NumPy request to within 3% up to $n = 8000$ and then falls 15% below it at
-  16000, where one of the three matrices below is written only on its diagonal.
+- The *RSS* exponent misses because RSS counts touched pages rather than
+  requested bytes — and, it turns out, misses by a different amount every time.
+
+**The RSS column does not reproduce, and that is worth more than the column
+was.** Re-running this script five times on one idle machine put the $n=16000$
+peak at 4.15, 4.46, 5.20, 5.46 and 5.89 GB — a **42% spread** — with the
+fitted exponent landing anywhere in $[1.75, 1.92]$ and the resident/requested
+ratio at $n = 8000$ running 0.93 to 1.03. Every NumPy-bytes figure was
+bit-identical across all five. That is the allocator and the page cache, not the algorithm:
+RSS is a high-water mark over pages the process has *touched*, and which pages
+those are depends on what the process did before. So the table above is one
+run, its RSS numbers are labelled as one run's, and anything extrapolated is
+now fitted on the deterministic column instead. Found by re-running the suite,
+not by reading it.
 
 **The peak is three copies of the Gram matrix, exactly, and the Cholesky owns
 two of them.** Traced at $n = 2400$: `sqdist` alone 2.00 × $8n^2$,
@@ -805,16 +816,23 @@ two of them.** Traced at $n = 2400$: `sqdist` alone 2.00 × $8n^2$,
 copy plus its output), and a whole `fit` 3.00 — $K$ alive while LAPACK
 factorizes a copy of it. The obvious economy, adding the noise diagonal in
 place instead of building an $n \times n$ matrix to hold $n$ numbers, was tried
-and **is not in the code**: it changes nothing measurable (1578.2 MB vs
-1578.5 MB peak RSS, identical NumPy peak), because that allocation reaches 3
-copies at its own moment too. Getting below 3 needs an in-place Cholesky, which
-NumPy does not expose.
+and **is not in the code**: the traced NumPy peak is *identical* with and
+without it, because that allocation reaches 3 copies at its own moment too.
+(The two peak-RSS readings were 1578.2 and 1578.5 MB. That pair is not the
+evidence — a 0.3 MB gap sits far inside the run-to-run spread above and could
+not have resolved a real change either way. The deterministic column is what
+settles it.) Getting below 3 needs an in-place Cholesky, which NumPy does not
+expose.
 
-**The wall.** The largest exact fit run here is $n = 16000$: 13.8 s and 5.20 GB.
-Everything past that is extrapolation and is labelled as such — the fitted law
-$77.2 \, n^{1.87}$ bytes reaches this machine's 17.2 GB at $n \approx 29{,}700$
-and would want 166 GB at $n = 10^5$. That is the real end of the exact GP: not
-a gradual slowdown but a fit that does not start.
+**The wall.** The largest exact fit run here is $n = 16000$: 13.8 s and, on
+that run, 5.20 GB resident. Everything past it is extrapolation and is labelled
+as such — but extrapolated from **what NumPy requests**, not from what the OS
+backed, precisely because of the paragraph above. The requested law is not
+fitted so much as confirmed: $24.1 \, n^{2.00}$ bytes at $r^2 = 1.0000$, which
+is $3 \times 8n^2$ — three copies of the Gram matrix, the constant the
+paragraph above traces and the tests pin. It reaches this machine's 17.2 GB at
+$n \approx 26{,}800$ and would want 240 GB at $n = 10^5$. That is the real end
+of the exact GP: not a gradual slowdown but a fit that does not start.
 
 **The crossover, in the other direction.** SGPR at $M = 64$ is *dearer* than
 the exact GP below $n \approx 170$ — it still touches all $n$ points and then
@@ -891,7 +909,7 @@ first run.
 To run a single experiment instead (timings measured by `reproduce.sh`):
 
 ```bash
-pytest                          # 275 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 276 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)

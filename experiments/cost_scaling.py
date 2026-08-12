@@ -345,18 +345,42 @@ def report(results, ram):
               f"points\n  and then does M x M algebra the exact one does not.")
 
     law_rss, xs, ys = fitted(exact, "rss_bytes", floor=ASYMPTOTIC_FROM)
+    law_np, xs_np, _ = fitted(exact, "numpy_bytes", floor=ASYMPTOTIC_FROM)
     print("\nthe wall (exact GP) -- everything below the line was run, "
           "everything above it is extrapolated")
     print(f"  largest exact fit actually run: n = {int(xs.max())}, "
-          f"peak {ys.max() / 1e9:.2f} GB")
-    print(f"  fitted law: peak RSS = {law_rss.prefactor:.3g} * "
+          f"peak {ys.max() / 1e9:.2f} GB resident")
+
+    # Two laws, because they are not equally trustworthy and the difference is
+    # the point. NumPy bytes are what the process ASKED for: deterministic, and
+    # here exactly 3 copies of an n x n float64 Gram matrix = 24 n^2. RSS is
+    # what the OS BACKED, which is a high-water mark over touched pages and is
+    # NOT reproducible -- five runs of this script on one idle machine put the
+    # n=16000 peak at 4.15, 4.46, 5.20, 5.46 and 5.89 GB (a 42% spread) and the
+    # fitted exponent anywhere in [1.75, 1.92]. So the headline extrapolation is
+    # the NumPy one, and the RSS one is reported next to it as a single run's
+    # observation rather than as a law.
+    print(f"  requested (NumPy, deterministic): {law_np.prefactor:.3g} * "
+          f"n^{law_np.exponent:.2f} bytes  (r2 {law_np.r2:.4f}), "
+          f"= 3 copies of 8n^2")
+    print(f"  resident (RSS, this run only):    {law_rss.prefactor:.3g} * "
           f"n^{law_rss.exponent:.2f} bytes  (r2 {law_rss.r2:.4f})")
     print(f"  ------------------------------- extrapolated from here down")
     for n in (1e5, 1e6):
-        print(f"  n = {n:>9,.0f} would want {law_rss.predict(n) / 1e9:>10,.1f} GB")
+        print(f"  n = {n:>9,.0f} would request {law_np.predict(n) / 1e9:>10,.1f} GB"
+              f"   (this run's RSS law: {law_rss.predict(n) / 1e9:,.1f} GB)")
     if ram:
-        print(f"  {ram / 1e9:.1f} GB (this machine) is reached at "
-              f"n ~ {law_rss.solve_for(ram):,.0f}")
+        print(f"  {ram / 1e9:.1f} GB (this machine) is requested at "
+              f"n ~ {law_np.solve_for(ram):,.0f}"
+              f"   (this run's RSS law: n ~ {law_rss.solve_for(ram):,.0f})")
+
+    # How closely the OS actually backs the request, printed rather than
+    # asserted in prose -- this is the ratio whose run-to-run drift is the
+    # reason the wall above is fitted on the NumPy column.
+    print("\n  resident / requested, where both were measured:")
+    for e in exact:
+        if e.get("numpy_bytes") and e.get("rss_bytes") and e["n"] >= ASYMPTOTIC_FROM:
+            print(f"    n = {e['n']:>6}: {e['rss_bytes'] / e['numpy_bytes']:.3f}")
 
     print("\nwhat the approximation gave up (M = 64, same data, same grid)")
     print(f"{'n':>7} {'exact lml':>12} {'ELBO gap':>10} {'max|dmean|':>11} "
@@ -406,18 +430,23 @@ def figure(exact, sparse, msweep, ram):
                                (sparse, f"SGPR M={M_DEFAULT}", "s-")):
         ax.plot([r["n"] for r in rows], [r["rss_bytes"] / 1e9 for r in rows],
                 style, label=label, ms=4)
-    law, xs, _ = fitted(exact, "rss_bytes", floor=ASYMPTOTIC_FROM)
+    # Extrapolate on the deterministic column, not the resident one: RSS varies
+    # ~30% run to run at the top size, so a wall drawn from it moves with it.
+    law, xs, _ = fitted(exact, "numpy_bytes", floor=ASYMPTOTIC_FROM)
     grid = np.geomspace(xs.min(), 3e5, 40)
     ax.plot(grid, law.predict(grid) / 1e9, ":", color="0.4", lw=1,
-            label=f"$n^{{{law.exponent:.2f}}}$, extrapolated")
+            label=f"requested $\\propto n^{{{law.exponent:.2f}}}$, extrapolated")
     if ram:
         ax.axhline(ram / 1e9, color="0.7", lw=1, ls="--")
         n_wall = law.solve_for(ram)
         ax.annotate(f"this machine's RAM\nreached at n ~ {n_wall:,.0f}",
                     (grid[0], ram / 1e9), textcoords="offset points",
                     xytext=(2, 4), fontsize=8, color="0.4")
+    # "peak memory", not "peak resident set": the points are resident bytes but
+    # the extrapolation is the requested law, for the reproducibility reason in
+    # the wall section above.
     ax.set(xscale="log", yscale="log", xlabel="training points n",
-           ylabel="peak resident set (GB)", title="Memory, and where it stops")
+           ylabel="peak memory (GB)", title="Memory, and where it stops")
     ax.legend(loc="upper left")
 
     ax = axes[2]

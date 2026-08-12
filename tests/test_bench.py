@@ -77,6 +77,29 @@ def test_traced_peak_counts_a_float64_matrix_at_eight_bytes_a_word():
     assert 8 * n * n <= peak < 8 * n * n * 1.02
 
 
+def test_exact_fit_peaks_at_exactly_three_copies_of_the_gram_matrix():
+    """The memory wall in experiments/cost_scaling.py is extrapolated from
+    ``24 n^2 bytes``, so that constant has to be a measurement and not a guess.
+
+    Three copies: K itself, LAPACK's private working copy, and the factor it
+    writes out. It is 3 and not 2 because K stays alive while the Cholesky
+    runs. This is the deterministic half of the memory story -- peak RSS on
+    the same fit varied 4.15-5.89 GB across five runs of one idle machine
+    (n = 16000), which is why the extrapolation is fitted on this column.
+    """
+    from gp.gp import GPRegressor
+    from gp.kernels import RBF
+
+    rng = np.random.default_rng(0)
+    n = 600
+    X = rng.uniform(-3, 3, size=(n, 1))
+    y = np.sin(X[:, 0])
+    _, peak = traced_peak(lambda: GPRegressor(RBF(s2=1.0, l=0.8),
+                                              noise_var=0.1).fit(X, y))
+    copies = peak / (8 * n * n)
+    assert 2.98 < copies < 3.05, copies
+
+
 def test_traced_peak_sees_the_peak_not_the_survivor():
     """Two matrices alive at once, one returned: the peak must show both. This
     is the property that makes the number meaningful for a Cholesky, whose
