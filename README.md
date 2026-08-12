@@ -915,12 +915,25 @@ monthly record), is committed, so there is nothing to download.
 - **Exact inference is still $O(n^3)$.** Random Fourier features (§10) lift the
   ceiling — 252× at $n=8000$ — but they buy accuracy at the Monte Carlo rate and
   starve the predictive variance once $n \gg D$, so they are a *mean*
-  accelerator, not a drop-in replacement. Inducing points (§11, Titsias 2009)
-  are the alternative that keeps the error bar, and on the gap benchmark they
-  reach a fixed accuracy in both moments at rank 32 where RFF does not reach it
-  at 2048 — but they carry their own failure mode (a $z$ in an empty region is
-  overconfident, §9.8), and the collapsed bound still needs all of $y$ at once.
-  Minibatched SVGP and non-Gaussian likelihoods are not implemented here.
+  accelerator, not a drop-in replacement. Inducing points (§11–§13, Titsias
+  2009) are the alternative that keeps the error bar, and on the gap benchmark
+  they reach a fixed accuracy in both moments at rank 32 where RFF does not
+  reach it at 2048 — but they carry their own failure mode (a $z$ in an empty
+  region is overconfident, §9.8), and FITC (§12) trades the bound for a
+  per-point noise term that hides the misfit rather than reporting it.
+- **The bound is collapsed, so it needs all of $y$ at once.** Optimizing $q(u)$
+  analytically is what makes $F$ tight and cheap, and it is also what rules out
+  minibatching: every step touches all $n$ points, so §14's $n = 128{,}000$ row
+  is bounded by what fits in memory, not by anything about the method. Keeping
+  $q(u)$ explicit and stochastic — SVGP (Hensman et al. 2013) — is the standard
+  next step and is not implemented here. Neither are deep or learned kernels,
+  which is the other half of what modern sparse GPs do with $Z$.
+- **Every sparse measurement here is one-dimensional.** The gradient checks run
+  in 1D and 2D, but §11–§13 all live on 1D targets, where "put $Z$ at the data
+  quantiles" is a rule that exists. In $d$ dimensions $Z$ carries $Md$ free
+  parameters, quantiles stop being defined, and the density-over-difficulty
+  result measured in §11 is exactly the kind of finding that need not survive a
+  change of dimension. Nothing here tests whether it does.
 - **RFF hyperparameters are not learned.** The feature map has no gradients, so
   ML-II has to be run on an exact GP (or a subset) first and the map built at
   those values; §8.6 of the theory doc sketches the reparameterization that
