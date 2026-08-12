@@ -41,9 +41,11 @@ reports one line of JSON. That also keeps allocator state, BLAS thread pools,
 and page-cache warmth from leaking between cells.
 
 Two memory numbers are reported per cell and they measure different things:
-``numpy`` is the peak of what NumPy requested (deterministic, portable, exactly
-8 bytes a word) and ``rss`` is the peak the OS actually backed (machine-
-dependent, includes BLAS workspace, excludes untouched pages). The tracing pass
+``numpy`` is the peak of what NumPy requested (reproducible run to run,
+exactly 8 bytes a word; the number of temporaries a call allocates does depend
+on the NumPy build) and ``rss`` is the peak the OS actually backed (not
+reproducible even run to run -- see the wall section -- includes BLAS
+workspace, excludes untouched pages). The tracing pass
 is a second run of the same work, so it is skipped once a single run
 costs more than ``TRACE_MAX_SECONDS``; RSS comes free from the timed runs and
 is always reported.

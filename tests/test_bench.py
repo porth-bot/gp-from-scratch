@@ -77,27 +77,45 @@ def test_traced_peak_counts_a_float64_matrix_at_eight_bytes_a_word():
     assert 8 * n * n <= peak < 8 * n * n * 1.02
 
 
-def test_exact_fit_peaks_at_exactly_three_copies_of_the_gram_matrix():
-    """The memory wall in experiments/cost_scaling.py is extrapolated from
-    ``24 n^2 bytes``, so that constant has to be a measurement and not a guess.
+def test_exact_fit_peak_is_a_small_multiple_of_the_gram_matrix():
+    """The memory wall in experiments/cost_scaling.py is extrapolated from a
+    law of the form ``c * 8 n^2``, so both halves of that need pinning -- and
+    they turn out to deserve very different confidence.
 
-    Three copies: K itself, LAPACK's private working copy, and the factor it
-    writes out. It is 3 and not 2 because K stays alive while the Cholesky
-    runs. This is the deterministic half of the memory story -- peak RSS on
-    the same fit varied 4.15-5.89 GB across five runs of one idle machine
-    (n = 16000), which is why the extrapolation is fitted on this column.
+    **The exponent is portable, the constant is not.** The peak is a whole
+    number of n x n float64 copies and grows exactly as n^2 everywhere; how
+    many copies depends on the NumPy build. On the pinned 2.5.0 it is 3.00 --
+    K, LAPACK's working copy, and the factor, three because K stays alive
+    while the Cholesky runs -- and on CI's 2.0.2 it is 2.03, because there the
+    working copy is taken somewhere tracemalloc cannot see it. So the wall's
+    24 n^2 is this environment's constant, which is why cost_scaling.py fits
+    the prefactor rather than hardcoding it, and why the README quotes the
+    figure with its NumPy version attached.
+
+    This is still the trustworthy column: it is bit-identical across runs on
+    one environment, where peak RSS on the same fit varied 4.15-5.89 GB across
+    five runs of one idle machine (n = 16000).
     """
     from gp.gp import GPRegressor
     from gp.kernels import RBF
 
-    rng = np.random.default_rng(0)
-    n = 600
-    X = rng.uniform(-3, 3, size=(n, 1))
-    y = np.sin(X[:, 0])
-    _, peak = traced_peak(lambda: GPRegressor(RBF(s2=1.0, l=0.8),
-                                              noise_var=0.1).fit(X, y))
-    copies = peak / (8 * n * n)
-    assert 2.98 < copies < 3.05, copies
+    def peak_copies(n):
+        rng = np.random.default_rng(0)
+        X = rng.uniform(-3, 3, size=(n, 1))
+        y = np.sin(X[:, 0])
+        _, peak = traced_peak(lambda: GPRegressor(RBF(s2=1.0, l=0.8),
+                                                  noise_var=0.1).fit(X, y))
+        return peak / (8 * n * n)
+
+    small, large = peak_copies(400), peak_copies(800)
+
+    # The law: doubling n quadruples the peak, so the copy count is flat in n.
+    assert large == pytest.approx(small, rel=0.02), (small, large)
+    # The constant: at least 2 (the matrix and its factor must both be live),
+    # never more than 3, and close to a whole number of copies either way.
+    for copies in (small, large):
+        assert 1.98 < copies < 3.05, copies
+        assert min(abs(copies - c) for c in (2, 3)) < 0.05, copies
 
 
 def test_traced_peak_sees_the_peak_not_the_survivor():

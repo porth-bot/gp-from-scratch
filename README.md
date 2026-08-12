@@ -773,7 +773,8 @@ GP, $O(nM^2)$ and $O(nM)$ for SGPR — and none of them measured one. This does:
 wall clock, peak memory, and the exponents they actually scale at, one
 subprocess per cell (peak RSS is a high-water mark and cannot be reset in
 process). Memory is reported twice on purpose. **NumPy bytes** is the peak of
-what NumPy requested, deterministic on any machine; **RSS** is what the OS
+what NumPy requested, which reproduces bit-for-bit on a given environment
+(and counts every float at exactly 8 bytes on any of them); **RSS** is what the OS
 backed, which is what decides whether a fit runs at all.
 
 | $n$ | exact: s | exact: RSS | exact: NumPy | SGPR $M{=}64$: s | SGPR: RSS | speed-up |
@@ -830,9 +831,22 @@ as such — but extrapolated from **what NumPy requests**, not from what the OS
 backed, precisely because of the paragraph above. The requested law is not
 fitted so much as confirmed: $24.1 \, n^{2.00}$ bytes at $r^2 = 1.0000$, which
 is $3 \times 8n^2$ — three copies of the Gram matrix, the constant the
-paragraph above traces and the tests pin. It reaches this machine's 17.2 GB at
+paragraph above traces. It reaches this machine's 17.2 GB at
 $n \approx 26{,}800$ and would want 240 GB at $n = 10^5$. That is the real end
 of the exact GP: not a gradual slowdown but a fit that does not start.
+
+One qualification on that constant, and CI is what found it. **The exponent is
+portable; the 3 is not.** On the pinned NumPy 2.5.0 the traced peak is 3.00
+copies; on the 2.0.2 that CI resolves for Python 3.9 it is **2.03**, because
+there the Cholesky's working copy is taken somewhere `tracemalloc` cannot see.
+Both builds give exactly $n^2$ and a whole number of copies, so the wall is
+$16n^2$ rather than $24n^2$ there and arrives a factor of $\sqrt{3/2}$ later.
+`cost_scaling.py` fits the prefactor rather than assuming it, so it reports
+whichever is true where it runs; the test asserts the $n^2$ law and a copy
+count in $\{2, 3\}$, which is what actually holds in both. "Deterministic"
+turned out to mean *across runs of one environment*, not across environments —
+which is still far better than RSS, and is worth stating precisely rather than
+leaving as a word.
 
 **The crossover, in the other direction.** SGPR at $M = 64$ is *dearer* than
 the exact GP below $n \approx 170$ — it still touches all $n$ points and then

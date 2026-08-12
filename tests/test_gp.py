@@ -422,6 +422,20 @@ def test_co2_rq_composite_lml_gradient_matches_finite_differences():
     synthetic stand-in: the real series is what makes the trend block badly
     scaled (s2 ~ 2500 against a short-term 0.5), and a gradient that is right
     on well-conditioned toy data is not the claim being made.
+
+    The step size is 1e-4, ten thousand times larger than the usual choice
+    here, and the reason is the second assertion. On this composite the FD
+    error is dominated by **cancellation**, not truncation: cond(K) ~ 6.5e5 at
+    the init, so the two shifted log-likelihoods agree in their leading digits
+    and subtracting them throws those digits away. Shrinking the step makes
+    the check monotonically WORSE -- worst relative error 7e-06 at 1e-4, 6e-04
+    at 1e-5, 3e-03 at 1e-6 -- which is the signature of cancellation and is the
+    opposite of what a wrong gradient does, since a wrong gradient leaves a
+    residual that does not care about the step at all. Asserting the ordering
+    is what makes the first assertion mean something instead of being a
+    threshold picked until it passed. (An earlier version of this test used
+    1e-6 and failed on CI's BLAS but not locally, which is the same trap in
+    its undetected form.)
     """
     import sys
     from pathlib import Path
@@ -438,18 +452,23 @@ def test_co2_rq_composite_lml_gradient_matches_finite_differences():
     assert p0.size == 12                          # 11 kernel + noise
     _, analytic = model.lml_and_grad(X, y, p0)
 
-    eps = 1e-6
-    numeric = np.empty_like(p0)
-    for i in range(p0.size):
-        pp, pm = p0.copy(), p0.copy()
-        pp[i] += eps
-        pm[i] -= eps
-        numeric[i] = (model.lml_and_grad(X, y, pp)[0]
-                      - model.lml_and_grad(X, y, pm)[0]) / (2 * eps)
-    # Relative to the largest entry: the trend blocks carry gradients ~1e2
-    # while the RQ alpha's is ~1e-1, so a shared atol would be meaningless.
-    scale = np.abs(analytic).max()
-    np.testing.assert_allclose(analytic, numeric, rtol=1e-4, atol=1e-6 * scale)
+    def worst_relative_error(eps):
+        numeric = np.empty_like(p0)
+        for i in range(p0.size):
+            pp, pm = p0.copy(), p0.copy()
+            pp[i] += eps
+            pm[i] -= eps
+            numeric[i] = (model.lml_and_grad(X, y, pp)[0]
+                          - model.lml_and_grad(X, y, pm)[0]) / (2 * eps)
+        # Per entry, not against the largest: the trend gradients are ~5 while
+        # the Periodic lengthscale's is ~5e-3, and a shared scale would let the
+        # small entries pass without being checked at all.
+        return float(np.max(np.abs(numeric - analytic)
+                            / np.maximum(np.abs(analytic), 1e-12)))
+
+    coarse, mid, fine = (worst_relative_error(e) for e in (1e-4, 1e-5, 1e-6))
+    assert coarse < 1e-4, coarse                  # the gradient itself
+    assert coarse < mid < fine, (coarse, mid, fine)  # ... and the error is the floor
 
 
 def test_heteroscedastic_noise_wrong_shape_raises():

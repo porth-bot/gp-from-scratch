@@ -138,7 +138,11 @@ def traced_peak(fn: "Callable[[], T]") -> "tuple[T, int]":
     Counts what NumPy *requested* -- NumPy routes its array allocations through
     tracemalloc's hook, so an (n, n) float64 array registers exactly 8 n^2
     bytes whether or not the pages are ever touched. The number is therefore
-    deterministic across machines, which `max_rss` is not.
+    reproducible run to run, which `max_rss` is not -- but reproducible is not
+    the same as identical everywhere: how many temporaries a given call
+    allocates is a property of the NumPy build, and a fit that peaks at three
+    copies of the Gram matrix on NumPy 2.5.0 peaks at two on 2.0.2, where the
+    Cholesky's working copy is taken out of tracemalloc's sight.
 
     What it does not see: memory allocated inside compiled dependencies that do
     not report to tracemalloc. LAPACK's Cholesky is out-of-place in NumPy, so
