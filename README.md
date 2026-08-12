@@ -507,8 +507,9 @@ both found by re-measuring it against a second approximation:
   99% of the honest one, is 22× worse in the gap than on the data. What fails
   in the gap is the *posterior*, not just its second moment.
 
-Raising $D$ is the only fix within RFF. §11 spends the same rank budget the
-other way and does not have to.
+Raising $D$ is the only fix within RFF. §11 keeps the kernel and approximates
+the posterior instead, and §13 spends the same rank budget both ways in the
+same gap.
 
 <p align="center"><img src="figures/rff.png" width="960"></p>
 
@@ -517,27 +518,160 @@ cannot be run through it as written — the frequencies are drawn *from* a
 density that depends on $\ell$. Fit the exact GP's hyperparameters first (on a
 subset if $n$ is large), then build the map at those values.
 
-### 11. Two ways to spend a rank budget (`experiments/rff_vs_sparse.py`)
+### 11. How many inducing points, and where they end up (`experiments/sparse.py`)
 
 §10 replaced the *kernel* with a randomized finite-rank surrogate. The other
-route keeps the model and approximates the *posterior*, summarizing $f$ through
-$M$ inducing variables $u = f(Z)$ (Titsias 2009; derived in
-[`theory/derivations.md`](theory/derivations.md) §9, implemented in
-[`gp/sparse.py`](gp/sparse.py)). Augmenting with $u$ changes nothing — it is the
-same GP at $M$ more inputs — so with $q(u)$ collapsed to its optimum the
-evidence lower bound is
+route keeps the model exactly and approximates the *posterior*: summarize $f$
+through $M$ inducing variables $u = f(Z)$ at locations $Z$ you choose
+(Titsias 2009; derived in [`theory/derivations.md`](theory/derivations.md) §9,
+implemented in [`gp/sparse.py`](gp/sparse.py)). Augmenting the model with $u$
+changes nothing — it is the same GP evaluated at $M$ more inputs — so with the
+variational $q(u)$ collapsed to its optimum, the log evidence acquires a lower
+bound
 
-$$F = \log \mathcal N(y \mid 0,\, Q_{ff} + \sigma^2 I) - \tfrac{1}{2\sigma^2}\operatorname{tr}(K_{ff} - Q_{ff}), \qquad Q_{ff} = K_{fu}K_{uu}^{-1}K_{uf},$$
+$$F = \log \mathcal N(y \mid 0,\, Q_{ff} + \sigma^2 I) - \tfrac{1}{2\sigma^2}\operatorname{tr}(K_{ff} - Q_{ff}), \qquad Q_{ff} = K_{fu}K_{uu}^{-1}K_{uf}.$$
 
-with the trace term the penalty for an inducing set that fails to explain $f$.
-Both methods are rank-$R$ and both cost $O(nR^2)$. They differ in **where the
-rank goes**: RFF picks $R$ global sinusoids from the spectral density before
-seeing the data; SGPR picks $R$ local basis functions $k(\cdot, z_m)$ sited on
-the input space.
+The first term is the older DTC approximation; the trace term is the penalty
+for an inducing set that fails to explain $f$, and it is what makes $F$ a
+*bound*. That is not decoration: the DTC term alone measures **above** the exact
+evidence (296.28 against 292.91 at $M = 16$, $n = 400$ — a test, not a remark),
+so dropping the trace does not give a looser bound, it gives something that is
+not a bound at all.
 
-So run them in the same gap. The setup is *imported* from `rff.py` rather than
-restated — same target, same $n = 3000$, same gap in $\lvert x\rvert < 1.2$,
-same kernel hyperparameters in every arm, 5 datasets × 9 feature draws. **$Z$ is
+Two questions follow. How large must $M$ be? And is optimizing $Z$ worth it —
+which the bound licenses, because $Z$ are variational parameters rather than
+model parameters, so more of them cannot overfit the way a free hyperparameter
+would. The target is deliberately two-scale, $\sin(1.1x) + 0.6\sin(5x)$ for
+$x > 0$ with $n = 800$ split 50/50 across $x = 0$, so one half of the domain is
+5× harder than the other. The exact GP's own ML-II fit ($\ell = 0.4563$,
+$\sigma^2 = 0.0093$ against a true $0.01$) gives log evidence **660.925**, and
+every row below is a gap measured *below* that ceiling.
+
+| $M$ | opt. $Z$: gap | mean err | sd err | frozen $Z$: gap | mean err | sd err |
+|---|---|---|---|---|---|---|
+| 2 | 1242.77 | 1.230 | 0.154 | 1573.45 | 1.555 | 0.031 |
+| 4 | 901.41 | 0.660 | 0.133 | 928.14 | 0.766 | 0.118 |
+| 8 | 868.16 | 0.647 | 0.065 | 872.10 | 0.621 | 0.033 |
+| 12 | 269.23 | 0.134 | 0.127 | 849.22 | 0.611 | 0.077 |
+| 16 | 79.37 | 0.088 | 0.087 | 187.61 | 0.212 | 0.073 |
+| 24 | **1.39** | 0.017 | 0.010 | 4.25 | 0.021 | 0.016 |
+| 32 | 0.00 | 0.0001 | 0.0000 | 0.11 | 0.0019 | 0.0017 |
+| 64 | 1.6e−06 | 0.0000 | 0.0000 | 4.0e−06 | 0.0000 | 0.0000 |
+
+The gap is monotone in $M$ and never negative in either arm — the bound
+behaving as derived. Optimizing $Z$ is worth **1.3–2× in inducing points**
+(optimized $M{=}8$ matches frozen $M{=}12$, optimized 32 matches frozen 48) for
+4% more wall clock: 1.20 s against 1.15 s per fit, 400 Adam steps each. And the
+transferable answer to "how large must $M$ be" is not a count but a spacing —
+what matters is how finely $Z$ sample the *kernel*, and the gap collapses at
+about **0.7 fitted lengthscales** between neighbours ($M{=}24$: 0.76 $\ell$,
+gap 1.4 nats; $M{=}32$: 0.61 $\ell$, gap 0.00).
+
+**Two things this experiment was written to show, and did not.**
+
+- **Posterior error is not monotone in $M$** — in either arm. The optimized
+  arm's sd error rises at $M = 12$ and again at 64; the frozen arm's at 4 and
+  12. Nothing is broken: each $M$ is a *separate* joint ML-II fit, so the
+  quantity that is monotone is the bound, which brackets one fixed number from
+  below at every $M$. The posterior that fit implies carries no such guarantee,
+  and the table is the reminder that "the bound converged" and "the posterior
+  converged" are different claims.
+- **The inducing points do not cluster where the function is hard.** Against a
+  5× frequency ratio, the $M = 64$ optimum puts 36 of 64 (56%) in the fast half
+  at a median spacing 1.15× denser — real, and far too weak to be the story. A
+  control settles it: redraw the data 3:1 toward the *slow* half, leaving the
+  function alone (the exact GP still fits $\ell = 0.4083$), and the sign
+  reverses — 25 of 64 (39%) in the fast half, 1.71× denser where the **data**
+  are. Density outweighs difficulty.
+
+The natural explanation for that second one is wrong, and finite differences
+say so. The tempting story is that $Z$ chase data because the trace penalty is a
+sum of conditional variances at the *training inputs* and never looks at $y$.
+But split $\partial F/\partial Z$ into its two terms at the quantile init and
+the $y$-blind trace contributes 92.37 against the $y$-aware DTC term's 419.95 —
+the two summing to the analytic gradient to 1.1e−06, which is the check that
+the split is real. Most of the force moving $Z$ is the part that *is* looking at
+the data. The hypothesis this measurement was written to confirm is the one it
+refuted.
+
+<p align="center"><img src="figures/sparse.png" width="900"></p>
+
+### 12. FITC: one flag, and a different way to fail (`experiments/fitc.py`)
+
+FITC (Snelson & Ghahramani 2006) differs from the bound above in exactly one
+move. Where VFE *penalizes* the shortfall $K_{ff} - Q_{ff}$ with a trace, FITC
+*absorbs* its diagonal into the likelihood, giving every training point its own
+extra noise $\Lambda_{ii} = k_{ii} - q_{ii}$. So both are one implementation
+over a general observation diagonal $D$ — $\sigma^2 I$ for VFE,
+$\Lambda + \sigma^2 I$ for FITC — sharing the factorization, the predictive
+equations and the gradient contraction, with only the noise block branching.
+`SGPR(..., method="fitc")` is the whole difference. Both are finite-difference
+checked over 7 kernels in 1D and 2D, and at $Z = X$ both reproduce
+`GPRegressor.lml_and_grad` while their $Z$-gradients vanish.
+
+The consequence is that FITC's extra noise is heteroscedastic and, crucially,
+*free*: wherever the inducing set explains $f$ badly, $\Lambda_{ii}$ absorbs the
+misfit and $\sigma^2$ does not have to. On a clumped design (six clusters of 25,
+true $\sigma^2 = 0.09$, five replicates per cell; the exact GP's own ML-II lands
+at $0.0918 \pm 0.0093$ with coverage 0.959 and NLPD 0.266):
+
+| $M$ | | fitted $\sigma^2$ | $\operatorname{tr}(K_{ff}-Q_{ff})$ | sd/exact | 95% cov. | NLPD |
+|---|---|---|---|---|---|---|
+| 6 | VFE | 0.1091 ± 0.0109 | 0.450 | 1.076 | 0.960 | 0.325 |
+| 6 | FITC | 0.0522 ± 0.0283 | 8.712 | 1.033 | 0.920 | 0.529 |
+| 10 | VFE | 0.1004 ± 0.0097 | 0.434 | 1.043 | 0.959 | 0.290 |
+| 10 | FITC | 0.0457 ± 0.0141 | 8.022 | 0.984 | 0.909 | 0.366 |
+| 20 | VFE | **0.0918** ± 0.0093 | 0.008 | 1.000 | 0.959 | 0.266 |
+| 20 | FITC | 0.0279 ± 0.0184 | 10.446 | 0.956 | 0.880 | 0.611 |
+| 40 | VFE | 0.0918 ± 0.0093 | 0.000 | 1.000 | 0.959 | 0.266 |
+| 40 | FITC | 0.0567 ± 0.0157 | 5.481 | 0.968 | 0.933 | 0.314 |
+
+VFE at $M = 20$ recovers the exact GP's ML-II noise to four decimals and drives
+its shortfall to zero. FITC's shortfall *rises* with $M$ — 8.7, 10.4, still 5.5
+at $M = 40$ — because nothing charges it for the shortfall; $\Lambda$ pays. What
+that costs is calibration: at $M = 20$, held-out coverage 0.880 against a
+nominal 0.95, and NLPD 0.611 against the exact GP's 0.266.
+
+**Two results here were not the expected ones.**
+
+- **"FITC drives the noise toward zero" is a tail, not the typical fit.** The
+  cell means are a 1.6–3.2× underestimate — a bias, not a collapse. The
+  collapse is real but lives in individual fits: 2 of 20 clumped fits land below
+  a fifth of the truth (worst **0.00129**, 1.4% of $\sigma^2$), and 0 of 20 on
+  the uniform control. Quoting the mean alone would hide the failure mode;
+  quoting the worst case alone would overstate how often it happens.
+- **The sign of the variance error depends on where you measure it.** At
+  $M = 20$ clumped, FITC's predictive sd is 0.956× exact on held-out *data* and
+  1.215× exact on a uniform grid over the same domain — too narrow where the
+  data are, too wide between them. That is precisely what a per-point noise term
+  should do, and it means "FITC is overconfident" is not a well-defined number
+  without saying where.
+
+**The counterweight, because the uniform control is not a FITC-only story:**
+VFE's own bias runs the other way and is larger at small $M$. On the uniform
+design at $M = 6$ it fits $\sigma^2 = 0.174$ — 1.9× the truth — with a
+predictive sd 1.37× exact. VFE cannot hide unexplained signal in $\Lambda$, so
+it books it as noise. Being too conservative is the safe method's failure mode,
+and the trace penalty is what buys it back as $M$ grows (0.750 → 0.004).
+
+One last practical difference: FITC's objective is **not a bound in either
+direction** — 253 nats below the exact evidence at $M = 16$ and 1.1 nats above
+it at $M = 32$, both tested — so unlike $F$ it cannot be read as a certificate
+of how much evidence the approximation gave up.
+
+<p align="center"><img src="figures/fitc.png" width="900"></p>
+
+### 13. Two ways to spend a rank budget (`experiments/rff_vs_sparse.py`)
+
+§10 and §11 are two routes to the same $O(nR^2)$: RFF approximates the kernel,
+SGPR approximates the posterior. They differ in **where the rank goes** — RFF
+picks $R$ global sinusoids from the spectral density before seeing the data;
+SGPR picks $R$ local basis functions $k(\cdot, z_m)$ sited on the input space.
+So put them in the same gap and see which spends the budget better.
+
+The setup is *imported* from `rff.py` rather than restated — same target, same
+$n = 3000$, same gap in $\lvert x\rvert < 1.2$, same kernel hyperparameters in
+every arm, 5 datasets × 9 feature draws. **$Z$ is
 never optimized**: it is placed at the data quantiles and left alone, so nothing
 below is a tuned method beating an untuned one.
 
@@ -595,7 +729,7 @@ for free, and one that follows the *domain* does not.
 
 <p align="center"><img src="figures/rff_vs_sparse.png" width="960"></p>
 
-### 12. What it all costs, measured (`experiments/cost_scaling.py`)
+### 14. What it all costs, measured (`experiments/cost_scaling.py`)
 
 Every section above quoted a complexity — $O(n^3)$ and $O(n^2)$ for the exact
 GP, $O(nM^2)$ and $O(nM)$ for SGPR — and none of them measured one. This does:
@@ -658,7 +792,7 @@ $k(Z, X)$, not flop-bound on the algebra the complexity is named after.
 And what the speed-up cost, on the same data: at $M = 64$ the bound is within
 $2.9 \times 10^{-5}$ nats of the exact log evidence at $n = 16000$, with
 posterior sd error $3 \times 10^{-6}$. That is a fact about a smooth 1D target
-with one lengthscale — §11 is the setting where the same $M$ is not nearly
+with one lengthscale — §13 is the setting where the same $M$ is not nearly
 enough, and it is the one to read this table against.
 
 <p align="center"><img src="figures/cost_scaling.png" width="960"></p>
@@ -808,7 +942,11 @@ Jacot, Gabriel & Hongler (2018) (the NTK); Lee et al. (2018) / Matthews et al.
 Williams & Bishop (1998) (the two-stage heteroscedastic GP); Gibbs (1997) and
 Paciorek & Schervish (2004) (the nonstationary input-dependent-lengthscale
 kernel); Bochner (1932), Rahimi & Recht (2007), Sutherland & Schneider (2015)
-and Wang et al. (2018) (random Fourier features and variance starvation).
+and Wang et al. (2018) (random Fourier features and variance starvation);
+Titsias (2009) (the variational bound and inducing-point optimization),
+Snelson & Ghahramani (2006) (FITC), Quiñonero-Candela & Rasmussen (2005) (the
+DTC/FITC/SoR family the bound sits in) and Bauer, van der Wilk & Rasmussen
+(2016) (the VFE-vs-FITC comparison §12 re-measures).
 Full list with roles in [`theory/derivations.md`](theory/derivations.md).
 
 ## Part of a from-scratch series
