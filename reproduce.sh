@@ -3,7 +3,7 @@
 # Regenerate every figure in figures/ and every number in the README, end to
 # end, from a clean checkout.
 #
-#     ./reproduce.sh              # full suite, ~5 min
+#     ./reproduce.sh              # full suite, ~13 min (step 16 is ~8 of them)
 #     PYTHON=/path/to/python ./reproduce.sh
 #
 # There is nothing to download and no cached state: the library is NumPy, the
@@ -76,6 +76,7 @@ step "12. sparse GPs: joint ML-II over Z, convergence"  experiments/sparse.py
 step "13. FITC vs VFE: the noise it hides in Lambda"    experiments/fitc.py
 step "14. features vs inducing points, same gap"        experiments/rff_vs_sparse.py
 step "15. cost: seconds, bytes, and the exponents"      experiments/cost_scaling.py
+step "16. sparse GPs at d=2: what survives the lift"   experiments/sparse2d.py
 
 echo
 echo "=================================================================="

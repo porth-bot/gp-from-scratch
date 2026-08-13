@@ -886,6 +886,111 @@ the rank sweep (SGPR $M = 1024$: 0.603 s → 0.393 s; RFF $D = 2048$: 0.670 s �
 number elsewhere in this README is unchanged — the suite, including the
 scikit-learn parity oracle at 1e-8, passes untouched.
 
+### 15. The same questions one dimension up (`experiments/sparse2d.py`)
+
+The limitation this closes was written into §11's own entry in the list below:
+every sparse measurement here was 1D, "put $Z$ at the data quantiles" is a rule
+that only exists on a line, and the density-over-difficulty result was named as
+exactly the kind of finding that need not survive a change of dimension. So:
+$d = 2$, where the exact GP still runs and everything is still scored against the
+real posterior. The target is §11's with one extra slow axis,
+$\sin(1.1x_1) + \sin(1.1x_2) + 0.6\sin(5x_1)[x_1 > 0]$, so the hard half-plane is
+the same object it was and the second axis adds dimension without adding
+structure. $n = 1600$.
+
+**The first thing that happens is that ML-II goes to the wrong optimum.**
+Carrying §11's initialization over unchanged — the ordinary act of reusing a
+script that works — lands the exact fit **1222 nats** below where every other
+start lands:
+
+| init $(s^2, \ell, \sigma^2)$ | fitted $s^2$ | $\ell$ | $\sigma^2$ | log evidence |
+|---|---|---|---|---|
+| (0.5, **2.0**, 0.3) — §11's | 1.7607 | 1.8073 | 0.09499 | **−482.45** |
+| (0.5, 0.5, 0.3) | 0.7535 | 0.5349 | 0.01021 | **739.71** |
+| (1.0, 0.3, 0.05) | 0.7535 | 0.5349 | 0.01021 | 739.71 |
+| (1.0, 1.0, 0.01) | 0.7535 | 0.5349 | 0.01021 | 739.71 |
+
+The bad optimum fits $\sigma^2 = 0.095$ against a true noise variance of
+**0.010**: it gives up on the fast component and calls it noise. §9 already
+documents ML-II multimodality on a 1D problem; this is the same failure met by
+accident rather than by construction, which is how it will be met in practice.
+Every gap below is measured against the *best* start, 739.708.
+
+**What replaces the quantiles.** Three frozen rules and one optimized arm, gap
+to the exact log evidence in nats:
+
+| $M$ | frozen: random subset | frozen: k-means | frozen: grid | optimized $Z$ |
+|---|---|---|---|---|
+| 16 | 1666.14 | 1367.86 | 1435.63 | 1324.24 |
+| 32 | 1273.36 | 1241.96 | 1306.51 | 1230.32 |
+| 64 | 1225.68 | 1224.16 | 1225.90 | 1222.26 |
+| 128 | 1222.19 | 1171.38 | 1222.22 | **615.15** |
+| 256 | 481.23 | **176.67** | 382.85 | **54.03** |
+
+**k-means is the right 2D replacement** — 2.2× better than a uniform grid and
+2.7× better than a random data subset at $M = 256$. (It is written from scratch
+in the experiment, Lloyd with k-means++ seeding and 10 restarts; scikit-learn is
+this repo's *test* oracle, not a dependency, so the tests compare the two on
+inertia.)
+
+**The flat column at ~1222 is the same basin, seen from the sparse side.** At
+$M \le 64$ every arm's gap sits at the basin separation itself, because the
+sparse model has the same choice of optimum and too few inducing points to
+represent the short lengthscale, so it takes the smooth one. Reading those rows
+as "a coarser approximation" would be wrong: they are fitting a different
+function. **Optimizing $Z$ is what escapes first** — at $M = 128$ it reaches 615
+while all three frozen placements are still stuck at 1222. In 1D optimizing $Z$
+was worth 1.3–2× in inducing points; here it is worth the difference between
+resolving the signal and calling it noise.
+
+**The density-over-difficulty result cannot be settled here, and finding out why
+is the more useful answer.** The raw numbers look like a clean reproduction —
+the 3:1 skew toward the slow half moves the share of $Z$ in the fast half from
+0.500 to 0.398 at $M = 256$, a shift of **−0.102** against 1D's −0.150, same
+sign and 68% of the size. But the two arms are not fitting the same function.
+The skewed arm leaves only 400 points in the fast half, and its *sparse* model
+never escapes the long-lengthscale basin at any $M$ run here: it reads
+$\ell = 1.950$ at $M = 128$ and again at $M = 256$, against its own exact GP's
+$\ell = 0.5435$. That 1.950 is not a coincidence — it is, to four figures, the
+skewed data's *own* smooth optimum (the control's exact GP has the same two
+basins, at $\ell = 1.9495$ and $\ell = 0.5435$, 768 nats apart, and now two of
+the four starts fall into the bad one rather than one). The uniform arm escapes
+at $M = 128$ ($\ell = 0.615$). So the
+comparison is between a model that has resolved the hard half and one that has
+decided there isn't one, and a difference in where $Z$ sit does not mean what it
+meant in 1D. The only $M$ where both arms are out of the basin is $M = 4$, where
+both read 0.500 and the bound is 2400 nats adrift.
+
+**What the control does establish is stronger than what it was built to test.**
+In 1D, thinning the hard half 3:1 left both arms fitting the same function and
+moved the inducing points. At $d = 2$ the same thinning stops the sparse model
+from resolving the hard half *at all*, at every $M$ up to 256 — density does not
+merely outweigh difficulty in the placement of $Z$, it decides whether the model
+represents the difficulty in the first place. That is a claim about this target
+and this budget, not a general law, and the honest summary is that §11's
+question changes character on the way up rather than answering yes or no.
+
+**And the number §11 offered as transferable does transfer.** It proposed $Z$
+spacing of about 0.7 fitted lengthscales as the portable form of the result. In
+2D, measured as median nearest-neighbour distance among $Z$ over the fitted
+$\ell$, the escaped cells read **1.02** at $M = 128$ and **0.74** at $M = 256$
+(frozen k-means: 0.81 and 0.64). The smaller-$M$ rows read 0.48–3.65 and are not
+comparable, because their $\ell$ is the smooth basin's.
+
+**What does not transfer is the budget.** §11 reached a 1.4-nat gap at $M = 24$
+and 1.6e−06 at $M = 64$. The same target with one more dimension and twice the
+data needs $M = 256$ to reach 54 nats — 39× looser than 1D managed at $M = 24$,
+and seven orders of magnitude looser than 1D's $M = 64$ row, at four times the
+inducing points. The curse of dimensionality lands on $M$, and the
+inducing-point budget is where a practitioner will feel it first.
+
+Honest scope: one seed, one target, and $d = 2$. Two dimensions is enough to
+break the quantile rule and to show which conclusions are about dimension rather
+than about a line, but "survives at $d = 2$" is not "survives at $d = 20$", and
+nothing here tests the latter.
+
+<p align="center"><img src="figures/sparse2d.png" width="960"></p>
+
 ## Reproduce
 
 One command, from a clean clone:
@@ -997,12 +1102,21 @@ monthly record), is committed, so there is nothing to download.
   $q(u)$ explicit and stochastic — SVGP (Hensman et al. 2013) — is the standard
   next step and is not implemented here. Neither are deep or learned kernels,
   which is the other half of what modern sparse GPs do with $Z$.
-- **Every sparse measurement here is one-dimensional.** The gradient checks run
-  in 1D and 2D, but §11–§13 all live on 1D targets, where "put $Z$ at the data
-  quantiles" is a rule that exists. In $d$ dimensions $Z$ carries $Md$ free
-  parameters, quantiles stop being defined, and the density-over-difficulty
-  result measured in §11 is exactly the kind of finding that need not survive a
-  change of dimension. Nothing here tests whether it does.
+- **The sparse results now reach $d = 2$, and one of the questions this bullet
+  used to ask came back unanswerable rather than answered.** §15 settles two
+  parts: k-means replaces the quantile rule, and "$Z$ spacing ≈ 0.7 fitted
+  lengthscales" transfers (0.74 at $M = 256$). It does not settle the
+  density-over-difficulty result — the density-skewed arm never escapes the
+  long-lengthscale optimum at any $M$ run, so its inducing points and the
+  uniform arm's are not describing the same fitted function, and the −0.102
+  shift that looks like a reproduction cannot be read as one. What replaces it
+  is a claim about resolution rather than placement: at $d = 2$, thinning the
+  hard half stops the model from representing it at all. The budget does not
+  transfer either ($M = 256$ for a 54-nat gap, where 1D reached 1.4 nats at
+  $M = 24$). All of it is one seed, one target, one dimension above the line;
+  nothing here tests $d = 10$ or $d = 20$, where $Z$'s $Md$ parameters and the
+  volume of the domain are the real problem and no exact GP is available to
+  score against.
 - **RFF hyperparameters are not learned.** The feature map has no gradients, so
   ML-II has to be run on an exact GP (or a subset) first and the map built at
   those values; §8.6 of the theory doc sketches the reparameterization that
