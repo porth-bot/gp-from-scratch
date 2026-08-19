@@ -59,6 +59,7 @@ derived in Sec. 2 and checked against central differences in the tests.
 | [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞), **ARD** (per-dimension lengthscales; → isotropic RBF when equal), **Gibbs** (nonstationary — input-dependent lengthscale $\ell(x)=e^{a+bx}$, PSD for any positive $\ell(\cdot)$; → RBF exactly when $b=0$) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
 | [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging, plus **multi-start ML-II** (the evidence is multimodal — §9) |
 | [`gp/rff.py`](gp/rff.py) | **Random Fourier features** (Rahimi & Recht 2007): the RBF's spectral density from Bochner's theorem, a cos/sin feature map that reproduces $k(x,x)$ *exactly*, and Bayesian linear regression in that feature space — the $O(n^3) \to O(nD^2)$ approximate GP (§10) |
+| [`gp/laplace.py`](gp/laplace.py) | **Non-Gaussian likelihoods** via the Laplace approximation (R&W Alg. 3.1/3.2): Bernoulli-logit, Poisson-log and a Gaussian control, a damped Newton solve that factorizes $B = I + W^{1/2}KW^{1/2}$ rather than $K$, the approximate log evidence, and predictive probabilities averaged over the latent by Gauss-Hermite quadrature (§16) |
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
 
@@ -991,6 +992,126 @@ nothing here tests the latter.
 
 <p align="center"><img src="figures/sparse2d.png" width="960"></p>
 
+### 16. A likelihood that is not Gaussian (`experiments/laplace.py`)
+
+Every section above this one assumes $y = f(x) + \varepsilon$ with Gaussian
+$\varepsilon$, and that assumption is not a convenience — it is the reason
+§1's conditioning formula gives an exact posterior at all. The Limitations
+section has named the obvious next gap since v1.0: binary labels, counts,
+anything whose observation model is not a normal density. Then the posterior
+
+$$p(f \mid y) \propto p(y\mid f)\, \mathcal{N}(f \mid 0, K)$$
+
+is not Gaussian and $p(y)$ is an $n$-dimensional integral. `gp/laplace.py`
+implements the standard answer — fit the Gaussian that matches the posterior's
+mode and the curvature there — and this section measures how wrong it is.
+
+The derivation is in [`theory/derivations.md` §10](theory/derivations.md): the
+mode equation $\hat f = K \nabla \log p(y \mid \hat f)$, the Woodbury
+rearrangement that lets the Newton step factorize
+$B = I + W^{1/2} K W^{1/2}$ instead of $K$ (whose conditioning is unbounded and
+which §14 already caught this repo mishandling once), the evidence
+$\log \hat Z = \Psi(\hat f) - \tfrac12 \log |B|$, and the predictive equations.
+
+<p align="center"><img src="figures/laplace.png" width="1000"></p>
+
+**The control comes first: with a Gaussian likelihood, Laplace is exact.** The
+posterior is Gaussian, the mode is its mean, $W = \sigma^{-2}$ is constant, and
+the log-determinant completes the exact log marginal likelihood. So `LaplaceGP`
+must reproduce `GPRegressor` — through entirely separate code — and it does:
+
+| | predictive mean | predictive variance | $\log p(y)$ | Newton iterations |
+|---|---|---|---|---|
+| max abs. difference | 1.8e-14 | 1.8e-15 | 1.4e-14 | 2 |
+
+Two iterations because $\Psi$ is exactly quadratic there, so Newton is exact in
+one and the second one detects it. This is the same discipline as §11's
+$Z = X$ check: prove the algebra against a known answer before measuring
+anything approximate.
+
+**Then the approximation, against an oracle that shares none of its
+assumptions.** The exact evidence is available by importance sampling *from the
+prior* — draw $f \sim \mathcal{N}(0,K)$, weight by $\prod_i p(y_i \mid f_i)$,
+average. For a Bernoulli likelihood those weights are bounded by 1, so the
+estimator of $p(y)$ is unbiased with finite variance by construction; nothing
+about the posterior's shape is assumed. §10's annealed-importance-sampling study
+is the reason it is run at five seeds with the spread reported next to every
+number it judges — an ESS read a perfect 1.000 there on an answer that was wrong.
+
+| $s^2$ | 0.25 | 1 | 4 | 16 | 64 |
+|---|---|---|---|---|---|
+| $\log \hat Z - \log Z$ (nats) | −0.0069 | −0.0330 | −0.0770 | −0.1295 | **−0.1728** |
+| oracle's own sd | 0.0020 | 0.0034 | 0.0037 | 0.0037 | 0.0054 |
+| $\max_x \lvert \Delta p \rvert$ | 0.0012 | 0.0106 | 0.0347 | 0.0862 | **0.1675** |
+| latent sd, Laplace / exact | 0.997 | 0.985 | 0.967 | 0.945 | **0.929** |
+| oracle ESS fraction | 0.27 | 0.10 | 0.052 | 0.037 | 0.028 |
+
+**The error is one-signed and it is set by the prior, not by the data.** The
+evidence is *always* underestimated and the latent posterior is *always* too
+narrow, at every amplitude tried and at $n=1$ against exact quadrature
+(`tests/test_laplace.py` asserts both directions rather than printing them).
+Both grow with $s^2$: a bigger prior variance lets the latent run out into the
+region where $\log \sigma$ is linear rather than quadratic, and a Gaussian
+fitted at the mode is a poor description of a posterior with tails that heavy.
+Over a 256× range in $s^2$ the evidence error grows 25× and the worst
+probability error 140×.
+
+**And $n$ barely moves it, which was not the expectation.** Bernstein–von Mises
+says the posterior concentrates and becomes Gaussian as data accumulates, so
+the approximation should improve. At fixed $s^2=4$:
+
+| $n$ | 4 | 8 | 16 | 24 | 32 |
+|---|---|---|---|---|---|
+| $\log \hat Z - \log Z$ | −0.087 | −0.092 | −0.102 | −0.128 | −0.122 |
+| oracle's own sd | 0.0022 | 0.0023 | 0.0046 | 0.0113 | 0.0266 |
+| $\max_x \lvert \Delta p \rvert$ | 0.031 | 0.035 | 0.035 | 0.031 | 0.025 |
+| oracle ESS fraction | 0.270 | 0.112 | 0.019 | 0.0053 | 0.0016 |
+
+The total evidence error grows 1.4× while $n$ grows 8× — so *per observation*
+it falls 5.6×, which is the concentration effect, arriving as a much weaker
+statement than "the approximation gets better". The probability error does not
+improve at all over this range. **The honest caveat is in the same table:** the
+oracle's effective sample size falls 165× across it and its own standard error
+grows 12×, so at $n=32$ the measurement is 4.6 standard errors from zero and
+would not survive being pushed much further. The oracle runs out before the
+method does, and that is a statement about the oracle.
+
+**The mistake that costs more than the approximation.** With a fitted model in
+hand it is tempting to report $\sigma(\mu_*)$ — push the latent mean through the
+link — instead of $\mathbb{E}[\sigma(f_*)]$. Jensen makes that one-signed too
+(the plug-in is always further from $\tfrac12$), and on the demo dataset the gap
+reaches **0.078 in probability where the Laplace approximation's own error
+against the exact answer is 0.034**. The shortcut is 2.3× worse than the thing
+everyone worries about. Panel (b) shows both.
+
+**ML-II here is a grid search, and the grid caught its own first answer.** There
+are no hyperparameter gradients in `gp/laplace.py` — $\hat f$ depends on
+$\theta$, so the total derivative carries an implicit term needing the
+likelihood's third derivative (theory §10.5), which is a real derivation and not
+a line — so the approximate evidence is maximized by exhaustive search. The
+first version of that search stopped at $s^2 = 64$ and reported 64 as the
+optimum; `on_edge` now flags a boundary argmax, and widening the grid finds the
+real one at $s^2 = 245$. Panels (e) and (f):
+
+| labels | optimal $s^2$ | optimal $\ell$ | $\log \hat Z$ |
+|---|---|---|---|
+| separable | 245.1 | 0.775 | −7.94 |
+| 15% flipped | 2.08 | 0.775 | −14.76 |
+
+The amplitude moves **118×** while the lengthscale does not move at all, which is
+the sensible reading of what $s^2$ means for a classifier: it is how far the
+latent is allowed to run, i.e. how confident the labels are permitted to be.
+With perfectly separable labels the evidence keeps paying for a larger amplitude
+for two and a half decades before the prior's own volume penalty catches up.
+
+**What this does not do.** No hyperparameter gradients, so ML-II does not scale
+past two or three parameters. No probit link (it needs $\log \Phi$, and this
+library is NumPy-only by rule — see the Provenance note on scikit-learn). No
+comparison against expectation propagation, which is the other standard
+approximation and is usually the more accurate one on exactly this model, so the
+errors above should be read as "what Laplace costs", not "what approximate
+inference costs".
+
 ## Reproduce
 
 One command, from a clean clone:
@@ -998,7 +1119,7 @@ One command, from a clean clone:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
-./reproduce.sh                  # tests, mypy, then all 15 experiments: ~5 min total
+./reproduce.sh                  # tests, mypy, then all 17 experiments: ~28 min total
 ```
 
 `requirements.txt` pins the exact versions every committed figure and number was
@@ -1007,7 +1128,7 @@ CI goes on testing against current releases on 3.9 and 3.12.
 
 **How exact is it? The script tells you, rather than this paragraph asking to
 be believed.** Rerunning the whole suite in that pinned environment regenerates
-15 of the 19 committed PNGs byte-for-byte: every experiment is seeded and
+17 of the 21 committed PNGs byte-for-byte: every experiment is seeded and
 NumPy's bit generators are stable across versions, so the datasets, the ML-II
 fits, and the tables are identical. The four that differ are
 `sklearn_parity.png`, `rff.png`, `rff_vs_sparse.png` and `cost_scaling.png`,
@@ -1025,27 +1146,31 @@ produces. Nothing would have noticed, because nothing was looking. They have
 been rebuilt; from now on a drifted figure is a line of output on anyone's
 first run.
 
-To run a single experiment instead (timings measured by `reproduce.sh`):
+To run a single experiment instead (timings from one `reproduce.sh` run on one
+machine — §14 measured how little wall clock reproduces, so read them as orders
+of magnitude):
 
 ```bash
-pytest                          # 276 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 340 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
 python validate.py              # ~3 s
-python co2.py                   # ~3 min (four ML-II fits; --steps 2000 for the convergence check)
+python co2.py                   # ~6 min (four ML-II fits; --steps 2000 for the convergence check)
 python ntk_experiments.py       # ~5 s
 python sklearn_parity.py        # ~1 s  (parity + speed vs scikit-learn)
 python heteroscedastic.py       # ~1 s  (two-stage input-dependent noise)
 python ard.py                   # ~1 s  (per-dimension lengthscales, relevance)
 python spatial2d.py             # ~1 s  (2D field: mean + uncertainty surfaces)
 python gibbs_kernel.py          # ~2 s  (nonstationary: input-dependent lengthscale)
-python multistart.py            # ~3 s  (ML-II multimodality; multi-restart escapes a bad basin)
-python rff.py                   # ~50 s (random Fourier features: rate, speed, and variance starvation)
-python sparse.py                # ~35 s (sparse GPs: joint ML-II over Z, convergence in M)
-python fitc.py                  # ~40 s (FITC vs VFE: the noise it hides in Lambda)
-python rff_vs_sparse.py         # ~90 s (features vs inducing points, same gap)
-python cost_scaling.py          # ~40 s (time, memory, exponents; --max-n 8000 skips the top)
+python multistart.py            # ~6 s  (ML-II multimodality; multi-restart escapes a bad basin)
+python rff.py                   # ~25 s (random Fourier features: rate, speed, and variance starvation)
+python sparse.py                # ~80 s (sparse GPs: joint ML-II over Z, convergence in M)
+python fitc.py                  # ~3 min (FITC vs VFE: the noise it hides in Lambda)
+python rff_vs_sparse.py         # ~40 s (features vs inducing points, same gap)
+python cost_scaling.py          # ~60 s (time, memory, exponents; --max-n 8000 skips the top)
+python sparse2d.py              # ~12 min (sparse GPs one dimension up; the longest single step)
+python laplace.py               # ~85 s (Laplace vs an importance-sampling oracle)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
@@ -1130,8 +1255,22 @@ monthly record), is committed, so there is nothing to download.
   scoring the wrong thing for this task. The honest alternatives are a
   non-stationary trend (a linear kernel, or a mean function) and selecting on
   predictive score rather than evidence; neither is implemented here.
-- **Gaussian likelihood only:** classification (non-Gaussian likelihood) would
-  need Laplace or EP, out of scope for this study.
+- **Non-Gaussian likelihoods reach as far as Laplace and no further.** §16 adds
+  Bernoulli-logit and Poisson-log through the Laplace approximation, with the
+  error measured against an importance-sampling oracle rather than assumed: it
+  is one-signed (the evidence is always under-estimated, the latent posterior
+  always too narrow) and it is set by the prior amplitude, not by $n$ — 0.007
+  nats at $s^2=0.25$ and 0.173 at $s^2=64$, while eight-fold more data moves it
+  1.4×. Three things stop there. **There are no hyperparameter gradients**,
+  because $\hat f$ depends on $\theta$ and the implicit term needs the
+  likelihood's third derivative (theory §10.5), so ML-II is a grid search and
+  does not scale past two or three parameters. **Expectation propagation is not
+  implemented**, and on this exact model it is usually the more accurate
+  approximation — so §16's numbers are what *Laplace* costs, not what
+  approximate inference costs. And **the oracle that measures all of it runs
+  out before the method does**: prior importance sampling has an effective
+  sample size that falls 165× between $n=4$ and $n=32$, so nothing above
+  $n \approx 32$ is checked against an exact answer at all.
 
 ## References
 

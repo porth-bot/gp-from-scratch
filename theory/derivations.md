@@ -23,6 +23,9 @@ Contents:
 7. NNGP, NTK, and linearized gradient descent (the geometric series)
 8. Bochner's theorem and random Fourier features (the `n^3 -> n D^2` trade)
 9. The variational sparse GP (Titsias): inducing points and the free-energy bound
+10. The Laplace approximation: a likelihood that is not Gaussian (and why it is
+    not a bound in either direction)
+11. Exercises
 
 ---
 
@@ -1278,7 +1281,176 @@ predictive distribution being conservative pointwise. It is not.
 
 ---
 
-## 10. Exercises
+## 10. The Laplace approximation: a likelihood that is not Gaussian
+
+Everything above this section rests on one structural fact: a Gaussian prior
+and a Gaussian likelihood give a Gaussian posterior, so Sec. 1's conditioning
+formula does the whole job. Replace $p(y_i \mid f_i)$ with anything else —
+Bernoulli labels, Poisson counts — and the posterior
+
+$$p(f \mid y) \;=\; \frac{p(y \mid f)\, \mathcal{N}(f \mid 0, K)}{p(y)},
+\qquad p(y) = \int p(y \mid f)\, \mathcal{N}(f \mid 0, K)\, df$$
+
+has no closed form and the evidence is an $n$-dimensional integral. The Laplace
+approximation is the cheapest honest answer: fit the Gaussian that agrees with
+the posterior at its mode, to second order.
+
+### 10.1 The objective and its mode
+
+Write the un-normalized log posterior as
+
+$$\Psi(f) \;=\; \log p(y \mid f) \;-\; \tfrac12 f^\top K^{-1} f
+\;-\; \tfrac12 \log|K| - \tfrac{n}{2}\log 2\pi ,$$
+
+and drop the last two terms, which do not depend on $f$. Then
+
+$$\nabla \Psi = \nabla \log p(y \mid f) - K^{-1} f,
+\qquad
+\nabla\nabla \Psi = -W - K^{-1},
+\qquad
+W \equiv -\nabla\nabla \log p(y \mid f),$$
+
+and $W$ is **diagonal** because the likelihood factorizes over the observations
+— that single fact is what makes everything below $O(n^3)$ rather than worse.
+Setting the gradient to zero gives the mode equation
+
+$$\boxed{\;\hat f \;=\; K \,\nabla \log p(y \mid \hat f)\;}\tag{10.1}$$
+
+which is worth reading before solving: the posterior mode is the kernel matrix
+applied to the likelihood's own residual, exactly as the GP regression mean is
+$K(K+\sigma^2 I)^{-1}y$. It is also a free correctness check on any solver —
+`LaplaceFit.stationarity` evaluates both sides by different routes and reports
+the gap.
+
+If $\log p(y\mid f)$ is concave in $f$ then $\Psi$ is strictly concave (the
+quadratic term is), so the mode is **unique** and Newton's method reaches it
+from anywhere. Bernoulli-logit ($W = \sigma(f)(1-\sigma(f)) \le 1/4$), Poisson
+with a log link ($W = e^f$) and Gaussian ($W = \sigma^{-2}$) are all concave.
+
+### 10.2 The Newton step, and why $K$ is never factorized
+
+The Newton update is
+
+$$f^{\text{new}} \;=\; f + (K^{-1} + W)^{-1}\!\left(\nabla \log p(y\mid f) - K^{-1} f\right).$$
+
+Written this way it needs $K^{-1}$, which is exactly what one must not form: a
+smooth kernel makes $K$ numerically singular long before $n$ is large, and this
+repo's own Sec. 14 measured what carelessness there costs. Two rearrangements
+fix it. First multiply out, using $b \equiv W f + \nabla \log p(y \mid f)$:
+
+$$f^{\text{new}} = (K^{-1}+W)^{-1}\big[(K^{-1}+W)f + \nabla\log p - K^{-1}f\big]
+= (K^{-1}+W)^{-1} b .$$
+
+Now apply the Woodbury identity to $(K^{-1}+W)^{-1}$ with
+$B \equiv I + W^{1/2} K W^{1/2}$:
+
+$$(K^{-1} + W)^{-1} \;=\; K - K W^{1/2} B^{-1} W^{1/2} K. \tag{10.2}$$
+
+(Check it by multiplying on the left by $K^{-1}+W$ and using
+$W^{1/2}KW^{1/2} = B - I$; every term cancels.) So with $a \equiv K^{-1}
+f^{\text{new}}$,
+
+$$\boxed{\;a = b - W^{1/2} B^{-1} W^{1/2} K b, \qquad f^{\text{new}} = K a\;}
+\tag{10.3}$$
+
+and **only $B$ is factorized**. That matters because $B$ is symmetric positive
+definite with eigenvalues in $[1,\, 1 + n\max_i W_{ii} \max_{ij}|K_{ij}|]$: its
+conditioning depends on the *sizes* of $K$ and $W$, never on $K$'s smallest
+eigenvalue. $W^{1/2}$ is real precisely because the likelihood is log-concave,
+which is where that assumption is actually spent.
+
+The Newton direction is an ascent direction ($\Psi$ concave), but the full step
+can overshoot when the curvature moves quickly — Poisson's $W = e^f$ changes by
+$e$ for every unit of $f$. Damping is done in $a$ coordinates rather than $f$:
+since $f = Ka$ is linear, the convex combination $a_t = a + t(a^{\text{new}}-a)$
+maps to $f_t = f + t(f^{\text{new}}-f)$, so $\Psi(f_t) = \sum_i \log p(y_i \mid
+f_{t,i}) - \tfrac12 a_t^\top f_t$ costs no extra solve.
+
+### 10.3 The approximate evidence
+
+Expanding $\Psi$ to second order about $\hat f$ and integrating the Gaussian,
+
+$$p(y) \;\approx\; e^{\Psi(\hat f)} \int \exp\!\left(-\tfrac12 (f-\hat f)^\top
+(K^{-1}+W)(f-\hat f)\right) df
+\;=\; e^{\Psi(\hat f)} (2\pi)^{n/2} |K^{-1}+W|^{-1/2},$$
+
+where the linear term vanishes because $\hat f$ is the mode. Restoring the
+$-\tfrac12\log|K| - \tfrac n2 \log 2\pi$ that was dropped, the $(2\pi)^{n/2}$
+cancels and the determinants combine:
+
+$$|K^{-1}+W|\,|K| = |I + KW| = |I + W^{1/2}KW^{1/2}| = |B|,$$
+
+(the middle equality is $|I+AB| = |I+BA|$), so
+
+$$\boxed{\;\log \hat Z \;=\; \log p(y\mid \hat f) - \tfrac12 \hat f^\top K^{-1}\hat f
+\;-\; \sum_i \log L_{ii}, \qquad L L^\top = B. \;}\tag{10.4}$$
+
+The log-determinant is free once $B$ has been factorized for the Newton step.
+
+**This is not a bound.** The variational free energy of Sec. 9 is below $\log
+p(y)$ by a KL divergence, always; (10.4) is a saddle-point expansion, and its
+error is whatever the posterior's departure from Gaussianity contributes, with
+no sign guaranteed by the derivation. Empirically, on the logit likelihood, it
+comes out **one-signed and negative** — the true posterior has heavier tails
+than the Gaussian fitted at its mode, so the fitted Gaussian's normalizer is
+too small. Sec. 16 measures that: $-0.007$ nats at $s^2 = 0.25$ growing to
+$-0.173$ at $s^2 = 64$, against an importance-sampling estimate of the exact
+evidence, and the same sign at $n=1$ against exact quadrature.
+
+### 10.4 Prediction
+
+The latent at a new point is Gaussian under $q$, with
+
+$$\mathbb{E}_q[f_*] = k_*^\top K^{-1}\hat f = k_*^\top \nabla\log p(y\mid \hat f)
+\tag{10.5}$$
+
+by the mode equation (10.1) — the same shape as GP regression's $k_*^\top
+\alpha$, with the likelihood residual in place of $(K+\sigma^2I)^{-1}y$ — and,
+substituting (10.2),
+
+$$\mathbb{V}_q[f_*] = k_{**} - k_*^\top (K + W^{-1})^{-1} k_*
+= k_{**} - v^\top v, \qquad v = L^{-1} W^{1/2} k_* . \tag{10.6}$$
+
+Read (10.6) as the usual variance reduction with the likelihood's *local*
+curvature standing in for the noise precision. Where an observation is
+confidently classified, $W_{ii} \to 0$ and that point removes almost no
+variance — which is why a GP classifier stays uncertain in a region of
+saturated labels, and is the honest behaviour rather than a defect.
+
+Finally, the quantity actually wanted is usually not $f_*$ but
+$\mathbb{E}[y_*]$, which needs the one-dimensional average
+
+$$\pi_* = \int g(f_*)\, \mathcal{N}(f_* \mid \mu_*, \sigma_*^2)\, df_* ,$$
+
+with $g = \sigma$ for the logit link. Gauss-Hermite quadrature does this to
+machine precision at a few tens of nodes. Skipping it and reporting
+$g(\mu_*)$ is a real error and a one-signed one: $\sigma$ is concave above its
+inflection and convex below, so Jensen puts $\pi_*$ strictly closer to $1/2$
+than $\sigma(\mu_*)$ at every point. Sec. 16 measures a gap of 0.078 in
+probability where the approximation's own error against the exact answer is
+0.034 — the shortcut costs more than the approximation does.
+
+### 10.5 What is missing here, and why it is not small
+
+There are no derivatives of (10.4) with respect to the hyperparameters in this
+repo, so ML-II is a grid search. The reason is not laziness about the algebra
+but its shape: $\hat f$ is itself a function of $\theta$, so
+
+$$\frac{d \log \hat Z}{d\theta_j}
+= \underbrace{\frac{\partial \log \hat Z}{\partial \theta_j}}_{\text{explicit}}
++ \sum_i \underbrace{\frac{\partial \log \hat Z}{\partial \hat f_i}
+\frac{\partial \hat f_i}{\partial \theta_j}}_{\text{implicit}} ,$$
+
+and the implicit term does not vanish — $\hat f$ maximizes $\Psi$, not $\log
+\hat Z$, and the two differ by the log-determinant. Working it out needs
+$\partial \hat f / \partial\theta$ from differentiating the mode equation, and
+that brings in the likelihood's **third** derivative through $\partial W /
+\partial f$ (Rasmussen & Williams, Alg. 5.1). It is a real derivation, not a
+line, and it is the next gap this section opens.
+
+---
+
+## 11. Exercises
 
 Five problems whose answers are already somewhere in this repo — as a line of
 code, a measured number, or a test. Solutions are collapsed; each one ends with
