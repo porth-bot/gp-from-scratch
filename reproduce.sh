@@ -77,6 +77,7 @@ step "13. FITC vs VFE: the noise it hides in Lambda"    experiments/fitc.py
 step "14. features vs inducing points, same gap"        experiments/rff_vs_sparse.py
 step "15. cost: seconds, bytes, and the exponents"      experiments/cost_scaling.py
 step "16. sparse GPs at d=2: what survives the lift"   experiments/sparse2d.py
+step "17. Laplace: a likelihood that is not Gaussian"   experiments/laplace.py
 
 echo
 echo "=================================================================="
@@ -92,7 +93,15 @@ echo "=================================================================="
 # older environment's bytes, until someone rebuilt them from a clean clone.
 TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png figures/rff_vs_sparse.png figures/cost_scaling.png"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    changed=$(git status --porcelain -- figures/ | awk '{print $2}')
+    # Only worktree-vs-index differences count as drift. The porcelain format
+    # is XY<space>path, X the index status and Y the worktree's: a figure that
+    # is merely *newly staged* reads "A  path" and is not drift at all. The
+    # first version of this check took field 2 unconditionally and duly
+    # reported a brand-new figure as "the repo is shipping figures its own code
+    # no longer produces", which is exactly the false alarm that trains people
+    # to ignore the check.
+    changed=$(git status --porcelain -- figures/ \
+        | awk '{ y = substr($0, 2, 1); if (y == "M" || substr($0,1,2) == "??") print $2 }')
     unexpected=""
     for f in ${changed}; do
         case " ${TIMING_FIGURES} " in
