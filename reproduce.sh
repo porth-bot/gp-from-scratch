@@ -3,8 +3,16 @@
 # Regenerate every figure in figures/ and every number in the README, end to
 # end, from a clean checkout.
 #
-#     ./reproduce.sh              # full suite, ~13 min (step 16 is ~8 of them)
+#     ./reproduce.sh              # full suite, ~26 min (step 16 is ~11 of them)
 #     PYTHON=/path/to/python ./reproduce.sh
+#
+# That number is measured, not estimated: 1537 s from a fresh clone on the
+# pinned environment. Four steps are most of it -- 16 (sparse2d, 684 s), 3
+# (CO2, four ML-II fits, 322 s), 13 (FITC, 40 fits, 171 s), 17 (Laplace, 83 s)
+# -- against 229 s for the other thirteen experiments and 48 s for the tests
+# and mypy. The README quotes ~28 min from a different run; Sec. 14 is the
+# section about why two runs of the same work disagree by that much, so take
+# either as an order of magnitude and neither as a property of the code.
 #
 # There is nothing to download and no cached state: the library is NumPy, the
 # only data file (data/co2_mm_mlo.txt, the Mauna Loa monthly record) is
@@ -16,9 +24,15 @@
 # Determinism: every experiment draws from np.random.default_rng(<fixed seed>)
 # and NumPy guarantees its bit generators are stable across versions, so the
 # datasets, fits, and tables reproduce exactly on the pinned environment in
-# requirements.txt. The one machine-dependent column is the NumPy-vs-scikit-learn
-# wall-clock ratio in the parity benchmark; its accuracy column (agreement to
-# ~1e-10) is the portable claim.
+# requirements.txt. What is NOT reproducible is anything holding a clock or a
+# resident-set size, and that is more than one column: a fresh-clone rerun
+# leaves exactly four of the 21 PNGs modified -- sklearn_parity, rff,
+# rff_vs_sparse and cost_scaling -- and all four are the ones that plot
+# seconds. cost_scaling also plots peak RSS, which Sec. 14 measured at a 42%
+# spread over five runs on one idle machine, so its bytes column (traced NumPy
+# allocations, bit-identical) is the one to read. The portable claims are the
+# accuracy columns: sklearn agreement to ~1e-10, the RFF and SGPR error rates,
+# and the n^2 memory law rather than its prefactor.
 set -euo pipefail
 cd "$(dirname "$0")"
 
