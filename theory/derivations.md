@@ -1516,10 +1516,19 @@ Implemented as `LaplaceGP.log_evidence_grad`, with `maximize_evidence` running
 Adam on it. Three checks, because this is the piece most able to be plausibly
 wrong: it reproduces `GPRegressor.lml_and_grad` to $10^{-8}$ under a Gaussian
 likelihood (where $\partial^3\log p = 0$, so the implicit term is exactly zero
-and only the explicit box is being tested); it matches central differences to
-$2\times10^{-5}$ relative for Bernoulli and Poisson across five kernel families
-(where it is not); and deleting the implicit term, or flipping its sign, fails
-that same check.
+and only the explicit box is being tested); it agrees with central differences
+to $3.3\times10^{-6}$ of the gradient's own magnitude in the worst of fifteen
+likelihood $\times$ kernel cells (where it is not); and deleting the implicit
+term, or flipping its sign, moves that disagreement to $2.8\times10^{-2}$ and
+$5.5\times10^{-2}$ — four orders of magnitude of room between right and
+plausible-but-wrong.
+
+The criterion is disagreement relative to the *gradient's* magnitude, not a
+per-component relative tolerance, and the reason is worth a line because CI
+found it: a central difference's error is set by the scale of the objective it
+differences, so a component 250 times smaller than its neighbour (the $\alpha$
+of a RationalQuadratic gradient) cannot be checked to the same relative
+precision, and whether it happens to be depends on the BLAS.
 
 **Measured (`experiments/laplace.py`, §5).** On 24 points with 15% flipped
 labels, an RBF kernel: the $21\times17$ grid spends 357 fits and reports

@@ -1111,11 +1111,17 @@ Z$, so differentiating the mode equation is required and the likelihood's
 **third** derivative appears through $\partial W/\partial f$ (theory §10.5).
 Three checks, because a wrong version of this is very plausible: it reproduces
 `GPRegressor.lml_and_grad` to $10^{-8}$ under a Gaussian likelihood (where the
-implicit term is exactly zero); it matches central differences to
-$2\times10^{-5}$ relative for Bernoulli and Poisson across five kernel
-families; and **deleting the implicit term, or flipping its sign, fails that
-same check** — R&W (5.23) prints the opposite sign to the one used here, so the
-finite difference settles it rather than the citation.
+implicit term is exactly zero); across fifteen likelihood × kernel cells it
+agrees with central differences to $3.3\times10^{-6}$ of the gradient's own
+magnitude in the worst cell; and **deleting the implicit term, or flipping its
+sign, moves that disagreement to $2.8\times10^{-2}$ and $5.5\times10^{-2}$** —
+four orders of magnitude, and R&W (5.23) prints the opposite sign to the one
+used here, so the finite difference settles it rather than the citation. The
+criterion is disagreement relative to the *gradient's* magnitude rather than a
+per-component `rtol`, because a central difference's error is set by the
+objective's scale: CI caught the first version of the check demanding the same
+relative precision from an $\alpha$ entry 250× smaller than its neighbour, and
+whether that is delivered depends on the BLAS.
 
 24 points, 15% flipped labels (§5 of the experiment):
 

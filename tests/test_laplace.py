@@ -458,6 +458,37 @@ def _fd_evidence_grad(kernel_factory, lik, X, y, eps=1e-3):
     return np.array(out)
 
 
+# The gradient check's criterion, in one place because three tests use it and
+# one of them needs it to *fail*.
+FD_TOL = 5e-5
+
+
+def _grad_mismatch(analytic, numeric):
+    """Largest disagreement, relative to the gradient's own magnitude.
+
+    Not a per-component ``rtol``, and CI is why. The first version of this
+    check used ``assert_allclose(rtol=2e-5)`` and failed on GitHub's runner
+    while passing here, on the ``alpha`` entry of a RationalQuadratic gradient
+    -- a component of 0.0074 sitting beside one of 1.89. A central difference's
+    error is set by the *objective*'s scale, not by the size of the component
+    being differentiated, so demanding the same relative precision from a
+    component 250x smaller than the largest asks the difference for accuracy it
+    does not have, and whether it happens to deliver it depends on the BLAS.
+    (The disagreement there was 5.4e-7 absolute, which is 2.9e-7 by this
+    measure -- inside the bound with two orders to spare.)
+
+    The bound is calibrated rather than chosen: the worst of the fifteen
+    likelihood x kernel cells reads 3.3e-6 here, so ``FD_TOL`` leaves 15x
+    headroom, while a gradient missing its implicit term reads 2.8e-2 and one
+    with the implicit term's sign flipped reads 5.5e-2 -- four orders above the
+    bound. There is a lot of room between "right" and "plausible but wrong",
+    and the tolerance sits in it.
+    """
+    numeric = np.asarray(numeric, dtype=float)
+    scale = max(float(np.max(np.abs(numeric))), 1.0)
+    return float(np.max(np.abs(np.asarray(analytic) - numeric))) / scale
+
+
 KERNEL_FACTORIES = [
     ("rbf", lambda: RBF(s2=1.2, l=0.9)),
     ("matern32", lambda: Matern(nu=1.5, s2=1.5, l=1.2)),
@@ -476,7 +507,7 @@ def test_evidence_gradient_matches_finite_differences(lik_name, kernel_name,
     model = LaplaceGP(factory(), lik).fit(X, y, tol=1e-12, max_iter=500)
     _, analytic = model.log_evidence_grad()
     numeric = _fd_evidence_grad(factory, lik, X, y)
-    np.testing.assert_allclose(analytic, numeric, rtol=2e-5, atol=1e-7)
+    assert _grad_mismatch(analytic, numeric) < FD_TOL
 
 
 def test_evidence_gradient_equals_the_exact_gp_gradient_under_a_gaussian():
@@ -519,8 +550,8 @@ def test_dropping_the_implicit_term_would_fail_the_finite_difference_check():
     ])
     numeric = _fd_evidence_grad(lambda: RBF(s2=1.2, l=0.9), lik, X, y)
 
-    np.testing.assert_allclose(full, numeric, rtol=2e-5, atol=1e-7)
-    assert not np.allclose(explicit_only, numeric, rtol=1e-3, atol=1e-4)
+    assert _grad_mismatch(full, numeric) < FD_TOL
+    assert _grad_mismatch(explicit_only, numeric) > 100 * FD_TOL
 
 
 def test_the_other_sign_of_the_implicit_term_would_fail_too():
@@ -548,8 +579,8 @@ def test_the_other_sign_of_the_implicit_term_would_fail_too():
         for dK in model.kernel.grads(model.X)
     ])
 
-    np.testing.assert_allclose(full, numeric, rtol=2e-5, atol=1e-7)
-    assert not np.allclose(flipped, numeric, rtol=1e-3, atol=1e-4)
+    assert _grad_mismatch(full, numeric) < FD_TOL
+    assert _grad_mismatch(flipped, numeric) > 100 * FD_TOL
 
 
 def test_fixed_parameters_are_absent_from_the_gradient():
@@ -561,8 +592,7 @@ def test_fixed_parameters_are_absent_from_the_gradient():
     model = LaplaceGP(factory(), lik).fit(X, y, tol=1e-12, max_iter=500)
     _, grad = model.log_evidence_grad()
     assert grad.shape == (1,)
-    np.testing.assert_allclose(grad, _fd_evidence_grad(factory, lik, X, y),
-                               rtol=2e-5, atol=1e-7)
+    assert _grad_mismatch(grad, _fd_evidence_grad(factory, lik, X, y)) < FD_TOL
 
 
 def test_gradient_ascent_reaches_at_least_the_grid_optimum():
