@@ -39,17 +39,28 @@ Also measured, because it is the mistake that is easiest to make with a fitted
 model in hand: the difference between ``sigmoid(mu_*)`` and
 ``E[sigmoid(f_*)]``. The first ignores the latent uncertainty entirely.
 
+**4. ML-II, two ways.** The evidence surface over ``(s2, l)`` by exhaustive
+grid, which is the only method that shows the surface and the only one that can
+notice its own argmax has landed on a boundary; and gradient ascent on the same
+objective (:func:`gradient_vs_grid`), which is cheaper and does not care how
+many hyperparameters there are. The comparison is run at two and at three
+parameters, and the three-parameter case is the one that says something: both
+methods agree on the two identified parameters and neither resolves the third,
+because the evidence is genuinely flat in it.
+
 Outputs: figures/laplace.png, and the numbers in the printed tables.
 """
 
 import argparse
+import time
 
 import numpy as np
 
 from common import savefig
 from gp.gp import GPRegressor
-from gp.kernels import RBF
-from gp.laplace import Bernoulli, GaussianLikelihood, LaplaceGP, grid_search
+from gp.kernels import RBF, RationalQuadratic
+from gp.laplace import (Bernoulli, GaussianLikelihood, LaplaceGP, grid_search,
+                        maximize_evidence)
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +309,12 @@ def on_edge(table, grids):
 def evidence_surface(n=24, flip=0.0, s2_grid=None, l_grid=None, verbose=True):
     """The approximate log evidence over (s2, l), by grid search.
 
-    There are no hyperparameter gradients in ``gp/laplace.py``, so this is how
-    ML-II is done there. Returning the whole surface rather than the argmax is
-    deliberate: Sec. 9 found ML-II multimodal on the Gaussian likelihood, and a
-    grid is the one method that shows the surface for free -- and shows when the
-    argmax has run into the edge of it (:func:`on_edge`).
+    The grid is no longer the only way to do ML-II here -- ``gp/laplace.py`` has
+    the evidence gradient now (:func:`gradient_vs_grid` below) -- but it is still
+    the one method that shows the *surface* for free, which matters because
+    Sec. 9 found ML-II multimodal on the Gaussian likelihood and a single ascent
+    reports only the basin it started in. The grid also shows when its own
+    argmax has run into the edge (:func:`on_edge`), which an optimizer cannot.
 
     ``flip`` corrupts a fraction of the labels, which is the second arm: with
     perfectly separable labels the evidence keeps rewarding a larger amplitude
@@ -321,6 +333,74 @@ def evidence_surface(n=24, flip=0.0, s2_grid=None, l_grid=None, verbose=True):
               f"at log Z_hat = {best_ml:.4f}{flag}")
     return {"s2_grid": s2_grid, "l_grid": l_grid, "table": table, "flip": flip,
             "best": best, "best_log_ml": best_ml, "edges": edges, "X": X, "y": y}
+
+
+def _ascend(kernel_factory, X, y, starts, steps, lr):
+    rows = []
+    for start in starts:
+        kernel = kernel_factory(*start)
+        t0 = time.perf_counter()
+        model, _ = maximize_evidence(kernel, Bernoulli(), X, y, lr=lr, steps=steps)
+        rows.append({
+            "start": start,
+            "theta": np.exp(kernel._theta).copy(),
+            "log_ml": model.log_marginal_likelihood(),
+            "fits": steps,
+            "secs": time.perf_counter() - t0,
+        })
+    return rows
+
+
+def _grid(kernel_factory, X, y, grids):
+    t0 = time.perf_counter()
+    best, log_ml, table = grid_search(kernel_factory, Bernoulli(), X, y, grids)
+    return {"best": best, "log_ml": log_ml, "fits": table.size,
+            "secs": time.perf_counter() - t0, "table": table, "grids": grids,
+            "edges": on_edge(table, grids)}
+
+
+def gradient_vs_grid(n=24, flip=0.15, steps=250, lr=0.08):
+    """ML-II by gradient ascent against ML-II by grid, on the same data.
+
+    The two methods answer different questions. The grid shows the whole
+    surface, and shows when its own argmax has run into an edge
+    (:func:`on_edge`); the gradient finds the interior optimum exactly and does
+    not care how many hyperparameters there are. This measures the second
+    against the first, in Laplace fits -- the ``O(n^3)`` unit, one per grid
+    point and one per ascent step (plus one more ``O(n^3)`` per step for the
+    gradient's ``R`` and ``K R``).
+
+    Two kernels, because the interesting part is the second. **RBF** has two
+    hyperparameters, which is the regime a grid is honest in.
+    **RationalQuadratic** has three, which is where the grid's cost goes
+    exponential -- and where its answer starts to depend on where its edges are.
+    Several starting points each, since a single ascent proves nothing about the
+    multimodality R&W Sec. 5.4.1 warns about.
+    """
+    X, y = make_data(n, seed=3, flip=flip)
+    out = {"X": X, "y": y, "flip": flip, "cases": []}
+
+    out["cases"].append({
+        "name": "RBF (2 params)",
+        "params": ("s2", "l"),
+        "grid": _grid(lambda s2, l: RBF(s2=s2, l=l), X, y,
+                      (np.geomspace(0.25, 1e4, 21), np.geomspace(0.1, 6.0, 17))),
+        "ascents": _ascend(lambda s2, l: RBF(s2=s2, l=l), X, y,
+                           [(1.0, 1.0), (0.3, 3.0), (30.0, 0.4)], steps, lr),
+    })
+
+    rq = lambda s2, l, a: RationalQuadratic(s2=s2, l=l, alpha=a)  # noqa: E731
+    out["cases"].append({
+        "name": "RationalQuadratic (3 params)",
+        "params": ("s2", "l", "alpha"),
+        "grid": _grid(rq, X, y, (np.geomspace(0.25, 1e3, 13),
+                                 np.geomspace(0.1, 6.0, 13),
+                                 np.geomspace(0.05, 50.0, 13))),
+        "ascents": _ascend(rq, X, y,
+                           [(1.0, 1.0, 1.0), (0.3, 3.0, 10.0), (30.0, 0.4, 0.2)],
+                           steps, lr),
+    })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +549,21 @@ def main(quick=False):
     print("\n4. ML-II by grid search over the approximate evidence")
     surfaces = [evidence_surface(n=24, flip=f) for f in (0.0, 0.15)]
 
+    print("\n5. ML-II by gradient ascent, against the same grid")
+    gv = gradient_vs_grid(steps=60 if quick else 250)
+    for case in gv["cases"]:
+        g = case["grid"]
+        flag = f"  ON THE GRID EDGE in axes {g['edges']}" if g["edges"] else ""
+        print(f"   {case['name']}, params {case['params']}")
+        print(f"     grid: {np.round(g['best'], 3)}  log Z_hat = {g['log_ml']:.4f}"
+              f"  [{g['fits']} fits, {g['secs']:.2f}s]{flag}")
+        for r in case["ascents"]:
+            print(f"     adam from {tuple(float(v) for v in r['start'])}: "
+                  f"{np.round(r['theta'], 3)}  log Z_hat = {r['log_ml']:.4f}"
+                  f"  [{r['fits']} fits, {r['secs']:.2f}s]")
+
     figure(d, amp, size, surfaces)
-    return control, amp, size, d, surfaces
+    return control, amp, size, d, surfaces, gv
 
 
 if __name__ == "__main__":

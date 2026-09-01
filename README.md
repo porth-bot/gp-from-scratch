@@ -59,7 +59,7 @@ derived in Sec. 2 and checked against central differences in the tests.
 | [`gp/kernels.py`](gp/kernels.py) | RBF, Matérn (½, 3⁄2, 5⁄2), Periodic, RationalQuadratic (RBF scale mixture; → RBF as α→∞), **ARD** (per-dimension lengthscales; → isotropic RBF when equal), **Gibbs** (nonstationary — input-dependent lengthscale $\ell(x)=e^{a+bx}$, PSD for any positive $\ell(\cdot)$; → RBF exactly when $b=0$) — each with analytic gradients in **log-parameter space** — plus `Sum`/`Product` composition and a **frozen-hyperparameter mask** (freeze e.g. a known period; `theta`/`grads`/`n_params` all honor it) |
 | [`gp/optimize.py`](gp/optimize.py) | Adam on the (negative) log evidence, with a callback for path logging, plus **multi-start ML-II** (the evidence is multimodal — §9) |
 | [`gp/rff.py`](gp/rff.py) | **Random Fourier features** (Rahimi & Recht 2007): the RBF's spectral density from Bochner's theorem, a cos/sin feature map that reproduces $k(x,x)$ *exactly*, and Bayesian linear regression in that feature space — the $O(n^3) \to O(nD^2)$ approximate GP (§10) |
-| [`gp/laplace.py`](gp/laplace.py) | **Non-Gaussian likelihoods** via the Laplace approximation (R&W Alg. 3.1/3.2): Bernoulli-logit, Poisson-log and a Gaussian control, a damped Newton solve that factorizes $B = I + W^{1/2}KW^{1/2}$ rather than $K$, the approximate log evidence, and predictive probabilities averaged over the latent by Gauss-Hermite quadrature (§16) |
+| [`gp/laplace.py`](gp/laplace.py) | **Non-Gaussian likelihoods** via the Laplace approximation (R&W Alg. 3.1/3.2): Bernoulli-logit, Poisson-log and a Gaussian control, a damped Newton solve that factorizes $B = I + W^{1/2}KW^{1/2}$ rather than $K$, the approximate log evidence, and predictive probabilities averaged over the latent by Gauss-Hermite quadrature, and the evidence gradient with its implicit $d\hat f/d\theta$ term (R&W Alg. 5.1) so ML-II is gradient ascent rather than a grid (§16) |
 | [`gp/nn.py`](gp/nn.py) | A finite-width one-hidden-layer ReLU network with **hand-written backprop** — the empirical object the NTK theory predicts |
 | [`gp/ntk.py`](gp/ntk.py) | Arc-cosine kernels $\kappa_0,\kappa_1$ (Cho & Saul 2009), the NNGP and NTK of that network, and the **closed-form linearized-GD trajectory** as a geometric series |
 
@@ -1084,14 +1084,12 @@ reaches **0.078 in probability where the Laplace approximation's own error
 against the exact answer is 0.034**. The shortcut is 2.3× worse than the thing
 everyone worries about. Panel (b) shows both.
 
-**ML-II here is a grid search, and the grid caught its own first answer.** There
-are no hyperparameter gradients in `gp/laplace.py` — $\hat f$ depends on
-$\theta$, so the total derivative carries an implicit term needing the
-likelihood's third derivative (theory §10.5), which is a real derivation and not
-a line — so the approximate evidence is maximized by exhaustive search. The
-first version of that search stopped at $s^2 = 64$ and reported 64 as the
-optimum; `on_edge` now flags a boundary argmax, and widening the grid finds the
-real one at $s^2 = 245$. Panels (e) and (f):
+**ML-II by grid search, and the grid caught its own first answer.** The
+approximate evidence over $(s^2, \ell)$ is mapped exhaustively, because a grid
+is the one method that shows the whole surface and shows when its own argmax has
+run into an edge. The first version of that search stopped at $s^2 = 64$ and
+reported 64 as the optimum; `on_edge` now flags a boundary argmax, and widening
+the grid finds the real one at $s^2 = 245$. Panels (e) and (f):
 
 | labels | optimal $s^2$ | optimal $\ell$ | $\log \hat Z$ |
 |---|---|---|---|
@@ -1104,8 +1102,43 @@ latent is allowed to run, i.e. how confident the labels are permitted to be.
 With perfectly separable labels the evidence keeps paying for a larger amplitude
 for two and a half decades before the prior's own volume penalty catches up.
 
-**What this does not do.** No hyperparameter gradients, so ML-II does not scale
-past two or three parameters. No probit link (it needs $\log \Phi$, and this
+**The evidence gradient, and what it is actually worth.** The grid is no longer
+the only option: `LaplaceGP.log_evidence_grad` implements
+$d\log\hat Z/d\theta$, including the *implicit* term through
+$d\hat f/d\theta$ that the earlier version of this section named as the next
+gap. It is not a line of algebra — $\hat f$ maximizes $\Psi$, not $\log\hat
+Z$, so differentiating the mode equation is required and the likelihood's
+**third** derivative appears through $\partial W/\partial f$ (theory §10.5).
+Three checks, because a wrong version of this is very plausible: it reproduces
+`GPRegressor.lml_and_grad` to $10^{-8}$ under a Gaussian likelihood (where the
+implicit term is exactly zero); it matches central differences to
+$2\times10^{-5}$ relative for Bernoulli and Poisson across five kernel
+families; and **deleting the implicit term, or flipping its sign, fails that
+same check** — R&W (5.23) prints the opposite sign to the one used here, so the
+finite difference settles it rather than the citation.
+
+24 points, 15% flipped labels (§5 of the experiment):
+
+| kernel | method | fits | result | $\log\hat Z$ |
+|---|---|---|---|---|
+| RBF (2 params) | $21\times17$ grid | 357 | $s^2 = 2.081$, $\ell = 0.775$ | −14.7613 |
+| | Adam, 3 starts | 250 each | all three: $2.481$, $0.762$ | **−14.7513** |
+| RationalQuadratic (3 params) | $13^3$ grid | 2197 | $\alpha = 50$ — *the top of the grid* | −14.7708 |
+| | Adam, 3 starts | 250 each | $\alpha = 57.8$, $63.6$, $771$ | −14.754 … −14.752 |
+
+The two-parameter row is the boring one: same optimum, found between grid
+points, at 70% of the cost, and no sign of the multimodality §5 found under a
+Gaussian likelihood. The three-parameter row is the argument, and it is not
+about speed. The grid spends 6× more fits and returns a boundary value for
+$\alpha$; the ascents beat it from every start but finish at $\alpha$ values a
+factor of 13 apart while agreeing on $s^2$ and $\ell$ to three digits and on the
+evidence to 0.003 nats. **Neither method resolves $\alpha$** — RQ tends to RBF
+as $\alpha\to\infty$, so the evidence is genuinely flat in that direction and
+there is no interior optimum to find. What the gradient buys is making that
+flatness visible in a few hundred fits instead of hiding it behind an argmax on
+an edge.
+
+**What this does not do.** No probit link (it needs $\log \Phi$, and this
 library is NumPy-only by rule — see the Provenance note on scikit-learn). No
 comparison against expectation propagation, which is the other standard
 approximation and is usually the more accurate one on exactly this model, so the
@@ -1170,7 +1203,7 @@ python fitc.py                  # ~3 min (FITC vs VFE: the noise it hides in Lam
 python rff_vs_sparse.py         # ~40 s (features vs inducing points, same gap)
 python cost_scaling.py          # ~60 s (time, memory, exponents; --max-n 8000 skips the top)
 python sparse2d.py              # ~12 min (sparse GPs one dimension up; the longest single step)
-python laplace.py               # ~85 s (Laplace vs an importance-sampling oracle)
+python laplace.py               # ~133 s (Laplace vs an oracle; + ML-II by gradient vs grid)
 ```
 
 Figures land in `figures/`; every table above is printed by the scripts.
@@ -1261,16 +1294,21 @@ monthly record), is committed, so there is nothing to download.
   is one-signed (the evidence is always under-estimated, the latent posterior
   always too narrow) and it is set by the prior amplitude, not by $n$ — 0.007
   nats at $s^2=0.25$ and 0.173 at $s^2=64$, while eight-fold more data moves it
-  1.4×. Three things stop there. **There are no hyperparameter gradients**,
-  because $\hat f$ depends on $\theta$ and the implicit term needs the
-  likelihood's third derivative (theory §10.5), so ML-II is a grid search and
-  does not scale past two or three parameters. **Expectation propagation is not
-  implemented**, and on this exact model it is usually the more accurate
+  1.4×. ML-II is no longer restricted to a grid — the evidence gradient, implicit
+  term and all, is implemented and finite-difference checked (theory §10.5) —
+  but two things still stop there, and one new one. **Expectation propagation is
+  not implemented**, and on this exact model it is usually the more accurate
   approximation — so §16's numbers are what *Laplace* costs, not what
   approximate inference costs. And **the oracle that measures all of it runs
   out before the method does**: prior importance sampling has an effective
   sample size that falls 165× between $n=4$ and $n=32$, so nothing above
-  $n \approx 32$ is checked against an exact answer at all.
+  $n \approx 32$ is checked against an exact answer at all. And **the gradient
+  does not make a flat direction identifiable**: on a three-parameter RQ kernel
+  three ascents agree on the evidence to 0.003 nats while landing a factor of 13
+  apart in $\alpha$, because RQ tends to RBF as $\alpha\to\infty$ and there is
+  no interior optimum there to find. Nothing here is sparse either — every
+  Laplace quantity factorizes an $n\times n$ matrix, so §§11–13's inducing
+  points and this section do not meet.
 
 ## References
 
