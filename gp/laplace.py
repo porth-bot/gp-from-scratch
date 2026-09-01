@@ -53,16 +53,26 @@ in ``a = K^-1 f`` coordinates rather than in f: any convex combination of two
 ``a`` vectors maps to the same convex combination of the ``f`` vectors, so
 ``Psi`` at an intermediate point costs no extra solve.
 
+**The hyperparameter gradient carries an implicit term.** ``fhat`` is itself a
+function of theta, so ``d log Zhat / d theta`` is not the explicit derivative:
+``fhat`` maximizes ``Psi``, not ``log Zhat``, and the two differ by the
+log-determinant, whose ``W`` is evaluated at the mode. Differentiating the mode
+equation to get ``d fhat / d theta`` brings in the likelihood's *third*
+derivative (:meth:`Likelihood.d3`), which is why this module's likelihoods carry
+one derivative more than the Newton iteration needs.
+:meth:`LaplaceGP.log_evidence_grad` implements it and
+:func:`maximize_evidence` runs ML-II on it, so hyperparameter selection is no
+longer restricted to :func:`grid_search`; the grid is kept because seeing the
+whole evidence surface is worth its cost on two parameters, and because it is
+what the gradient is checked against.
+
 What this module does *not* do, and the limitation is real
 ----------------------------------------------------------
-There are no gradients of the approximate log marginal likelihood with respect
-to the hyperparameters. They exist (Rasmussen & Williams, Alg. 5.1) and they
-are not a small addition: ``fhat`` itself depends on theta, so the total
-derivative has an *implicit* term through ``d fhat / d theta`` on top of the
-explicit one, and that term needs the likelihood's third derivative. So
-hyperparameter selection here is a grid search over the approximate evidence
-(:func:`grid_search`), which is honest for two parameters and does not scale.
-That is the next gap this module opens, and the README says so.
+Expectation propagation is not here, and on binary classification it is usually
+the more accurate approximation -- so what ``experiments/laplace.py`` measures
+is the cost of *Laplace*, not the cost of approximate inference. Nothing here
+is sparse either: every call factorizes an ``n x n`` matrix, so the Titsias
+machinery of Sec. 9 and this module do not yet meet.
 
 References: Rasmussen & Williams, *Gaussian Processes for Machine Learning*,
 Chapter 3 (Algorithms 3.1 and 3.2). The derivation, including why the mode
@@ -77,10 +87,11 @@ from typing import Optional
 import numpy as np
 
 from .linalg import cho_solve, solve_lower
+from .optimize import adam_maximize
 
 __all__ = [
     "Likelihood", "Bernoulli", "Poisson", "GaussianLikelihood",
-    "LaplaceGP", "LaplaceFit", "grid_search",
+    "LaplaceGP", "LaplaceFit", "grid_search", "maximize_evidence",
 ]
 
 
@@ -110,6 +121,23 @@ class Likelihood:
 
     def d2(self, y: np.ndarray, f: np.ndarray) -> np.ndarray:
         """d^2 log p(y|f) / df^2, <= 0 where the likelihood is log-concave."""
+        raise NotImplementedError
+
+    def d3(self, y: np.ndarray, f: np.ndarray) -> np.ndarray:
+        """d^3 log p(y|f) / df^3.
+
+        Needed only by :meth:`LaplaceGP.log_evidence_grad`, and needed there
+        for a reason worth stating: the log-determinant in the approximate
+        evidence depends on the hyperparameters *through the mode*, so the
+        total derivative carries a term in ``d fhat / d theta``, and
+        differentiating the mode equation brings in ``dW/df`` -- the third
+        derivative. It is the reason the Laplace gradient is a derivation
+        rather than a line, and the reason this method exists on a class that
+        otherwise stops at two derivatives.
+
+        Every implementation here is checked against a finite difference of
+        :meth:`d2` in ``tests/test_laplace.py``.
+        """
         raise NotImplementedError
 
     def check_targets(self, y: np.ndarray) -> np.ndarray:
@@ -174,6 +202,14 @@ class Bernoulli(Likelihood):
         p = self._sigmoid(f)
         return -p * (1.0 - p)
 
+    def d3(self, y, f):
+        # d2 = -(p - p^2) and dp/df = p(1-p), so d3 = -(1 - 2p) p (1 - p).
+        # Odd about f = 0 and zero there: at an undecided point the curvature
+        # is at its maximum and locally flat, so the implicit term of the
+        # evidence gradient vanishes exactly where the model is least sure.
+        p = self._sigmoid(f)
+        return -(1.0 - 2.0 * p) * p * (1.0 - p)
+
     def mean(self, f):
         return self._sigmoid(f)
 
@@ -205,6 +241,9 @@ class Poisson(Likelihood):
 
     def d2(self, y, f):
         return -np.exp(f)
+
+    def d3(self, y, f):
+        return -np.exp(f)          # every derivative past the first is -e^f
 
     def mean(self, f):
         return np.exp(f)
@@ -242,6 +281,13 @@ class GaussianLikelihood(Likelihood):
 
     def d2(self, y, f):
         return np.full(np.shape(f), -1.0 / self.noise_var)
+
+    def d3(self, y, f):
+        # Constant curvature, so no implicit term at all: with this likelihood
+        # the evidence gradient collapses to the explicit two terms, and those
+        # must reproduce GPRegressor.lml_and_grad exactly. That is the check
+        # the whole derivation is anchored on.
+        return np.zeros(np.shape(f))
 
     def mean(self, f):
         return f
@@ -475,6 +521,117 @@ class LaplaceGP:
         grid = mean[:, None] + sd[:, None] * x[None, :]
         return (self.likelihood.mean(grid) @ w), var
 
+    def log_evidence_grad(self) -> "tuple[float, np.ndarray]":
+        """The approximate log evidence and its gradient w.r.t. kernel theta.
+
+        Returns ``(log_ml, grad)`` with ``grad`` in the kernel's ``theta``
+        order (log-space, free parameters only), ready for
+        ``gp.optimize.adam_maximize``.
+
+        The derivation (theory Sec. 10.5; Rasmussen & Williams Alg. 5.1). The
+        thing that makes this harder than the Gaussian case is that ``fhat``
+        depends on theta, so
+
+            d log Zhat / d theta_j = (explicit) + sum_i (d log Zhat / d fhat_i)
+                                                     (d fhat_i / d theta_j),
+
+        and the implicit term does *not* vanish. ``fhat`` maximizes ``Psi``,
+        not ``log Zhat``; the two differ by the log-determinant, whose value
+        moves when ``fhat`` moves because ``W`` is evaluated there.
+
+        **Explicit part**, holding ``fhat`` (hence ``W``) fixed:
+
+            1/2 a^T (dK/dtheta_j) a  -  1/2 tr[(K + W^-1)^-1 dK/dtheta_j]
+
+        with ``a = K^-1 fhat``. The second term comes from
+        ``log|B| = log|K| + log|K^-1 + W|``, whose two theta-derivatives
+        combine by Woodbury into the single ``(K + W^-1)^-1`` -- which is
+        ``sqrt(W) B^-1 sqrt(W)``, so the existing Cholesky of ``B`` is all it
+        needs and ``K`` is still never factorized.
+
+        **The sensitivity of the objective to the mode.** ``Psi`` is stationary
+        at ``fhat``, so only the determinant contributes:
+
+            d log Zhat / d fhat_i = +1/2 [(K^-1 + W)^-1]_ii  d3 log p(y|fhat)_i
+
+        The sign here is worth a sentence, because R&W (5.23) prints the
+        opposite one while defining ``W = -grad grad log p``. With that
+        definition ``dW_i/dfhat_i = -d3_i``, and the minus from ``-1/2 log|B|``
+        cancels it. GPML's ``infLaplace`` uses the ``+1/2`` form; so does this,
+        and ``tests/test_laplace.py`` settles it by finite difference rather
+        than by citation -- the wrong sign still produces a plausible vector
+        that is simply not the gradient.
+
+        **The sensitivity of the mode to theta.** Differentiate the mode
+        equation ``fhat = K grad log p(y | fhat)`` in theta:
+
+            d fhat/d theta_j = (dK/dtheta_j) a - K W (d fhat/d theta_j)
+            => (I + KW) d fhat/d theta_j = (dK/dtheta_j) a
+
+        and ``(I + KW)^-1 = I - K (K + W^-1)^-1``, so the solve reuses the same
+        matrix as the explicit part and never touches ``W^-1`` -- which matters,
+        since a confidently-classified Bernoulli point has ``W`` at 1e-16 and
+        ``W^-1`` would be the only ill-conditioned object in the derivation.
+
+        ``[(K^-1 + W)^-1]_ii`` is read off ``K - K R K`` with
+        ``R = (K + W^-1)^-1`` (Woodbury again).
+
+        Cost is one extra ``O(n^3)`` (forming ``R`` and ``K R``) plus ``O(n^2)``
+        per hyperparameter, against the ``O(n^3)`` per grid point that
+        :func:`grid_search` spends -- so the gradient pays for itself at three
+        grid points and does not care how many parameters there are.
+
+        Examples
+        --------
+        With a Gaussian likelihood the Laplace evidence *is* the exact one, so
+        this must reproduce ``GPRegressor.lml_and_grad``:
+
+        >>> import numpy as np
+        >>> from gp.gp import GPRegressor
+        >>> from gp.kernels import RBF
+        >>> rng = np.random.default_rng(0)
+        >>> X = rng.normal(size=(12, 1))
+        >>> y = np.sin(3 * X[:, 0]) + 0.1 * rng.normal(size=12)
+        >>> m = LaplaceGP(RBF(s2=1.3, l=0.7), GaussianLikelihood(0.05)).fit(X, y)
+        >>> v, g = m.log_evidence_grad()
+        >>> exact = GPRegressor(RBF(s2=1.3, l=0.7), noise_var=0.05)
+        >>> ve, ge = exact.lml_and_grad(X, y)
+        >>> bool(abs(v - ve) < 1e-8), bool(np.allclose(g, ge[:2], atol=1e-7))
+        (True, True)
+        """
+        assert self._fitted, "call fit() first"
+        fit = self.fit_
+        n = self.X.shape[0]
+        K, W, L, a = self.K, fit.W, fit.L, fit.a
+        sW = np.sqrt(W)
+
+        # R = (K + W^-1)^-1 = sqrt(W) B^-1 sqrt(W). Symmetrized because the
+        # two triangular solves are not exactly transposes of each other in
+        # floating point, and every use below assumes symmetry.
+        R = sW[:, None] * cho_solve(L, np.diag(sW))
+        R = 0.5 * (R + R.T)
+        KR = K @ R
+
+        # d log Zhat / d fhat: half the diagonal of (K^-1 + W)^-1 = K - K R K,
+        # times the likelihood's third derivative at the mode.
+        diag_cov = np.diag(K) - np.einsum("ij,ji->i", KR, K)
+        dlog_df = 0.5 * diag_cov * self.likelihood.d3(self.y, fit.f)
+
+        # (I + KW)^-T applied to dlog_df, once, rather than per hyperparameter:
+        # implicit_j = dlog_df^T (I + KW)^-1 C a = [(I - K R)^T dlog_df]^T C a.
+        u = dlog_df - R @ (K @ dlog_df)
+
+        grads = []
+        for dK in self.kernel.grads(self.X):
+            # the jitter is a function of K, so it is a function of theta too;
+            # this is the derivative of the matrix the fit actually used.
+            C = dK + np.eye(n) * (self.jitter * float(np.mean(np.diag(dK))))
+            Ca = C @ a
+            explicit = 0.5 * float(a @ Ca) - 0.5 * float(np.sum(R * C))
+            implicit = float(u @ Ca)
+            grads.append(explicit + implicit)
+        return fit.log_ml, np.array(grads)
+
     def log_marginal_likelihood(self) -> float:
         """The approximate log evidence. **Not a bound in either direction.**
 
@@ -490,7 +647,7 @@ class LaplaceGP:
 
 
 # ---------------------------------------------------------------------------
-# Hyperparameters, without gradients
+# Hyperparameters: the whole surface, or the optimum
 # ---------------------------------------------------------------------------
 def grid_search(kernel_factory, likelihood, X, y, grids, verbose=False):
     """ML-II by exhaustive search over a grid of hyperparameters.
@@ -502,10 +659,14 @@ def grid_search(kernel_factory, likelihood, X, y, grids, verbose=False):
     just the argmax -- Sec. 9 found ML-II's own surface to be multimodal on the
     Gaussian likelihood and there is no reason to expect better here.
 
-    This exists because the approximate evidence has no gradient in this module
-    (see the module docstring), so ``gp.optimize.adam_maximize`` cannot be used.
-    It is fine for two parameters and hopeless for ten, and that is the honest
-    statement of where this module stops.
+    This predates :func:`maximize_evidence` and is kept rather than replaced,
+    because the two answer different questions. A grid is the only method that
+    shows the whole surface, and the only one that can notice its own argmax has
+    landed on an edge -- which is not hypothetical: the 3-parameter case in
+    ``experiments/laplace.py`` returns ``alpha`` at the top of its grid, and the
+    reason turns out to be that the evidence is flat in ``alpha``, not that the
+    grid was too small. What a grid cannot do is scale: its cost is exponential
+    in the number of hyperparameters, where the gradient's is flat.
     """
     mesh = np.meshgrid(*grids, indexing="ij")
     table = np.full(mesh[0].shape, -np.inf)
@@ -522,3 +683,51 @@ def grid_search(kernel_factory, likelihood, X, y, grids, verbose=False):
         if verbose:
             print(f"  {values} -> {table[idx]:.4f}")
     return best[0], best[1], table
+
+
+def maximize_evidence(kernel, likelihood, X, y, lr: float = 0.05,
+                      steps: int = 200, jitter: float = LaplaceGP.JITTER,
+                      callback=None):
+    """ML-II on the approximate evidence, by gradient ascent.
+
+    Returns ``(fitted_model, history)``; ``kernel`` is left at the best
+    hyperparameters found, matching :func:`gp.optimize.maximize_lml_multistart`.
+
+    This is what :meth:`LaplaceGP.log_evidence_grad` buys. :func:`grid_search`
+    costs one ``O(n^3)`` Laplace fit per grid point and its cost is exponential
+    in the number of hyperparameters; this costs one fit plus one extra
+    ``O(n^3)`` per *step*, and the step count does not care how many parameters
+    there are.
+
+    Two caveats it inherits rather than introduces. The evidence surface is
+    multimodal for the same reason it is under a Gaussian likelihood -- "the
+    data is signal" and "the data is noise" are competing optima (R&W Sec. 5.4.1)
+    -- so a single ascent lands in whichever basin it starts in, and the
+    multi-start argument of ``gp.optimize.maximize_lml_multistart`` applies here
+    unchanged. And the objective is an *approximate* evidence, so its optimum is
+    the optimum of the approximation; ``experiments/laplace.py`` measures how far
+    that is from the exact one.
+
+    A step whose Newton solve fails yields a hugely negative value and a zero
+    gradient, so it is wasted rather than fatal and is never selected as the
+    best. That guard is insurance and not a routine path: the solve turned out
+    hard to break from the outside, since the line search halves the step until
+    ``Psi`` increases and a Poisson model still converges at a prior amplitude
+    of ``exp(700)``. ``tests/test_laplace.py`` reaches it by injection and says
+    so.
+    """
+    theta0 = np.asarray(kernel.theta, dtype=float).copy()
+
+    def value_and_grad(theta):
+        kernel.theta = theta
+        try:
+            model = LaplaceGP(kernel, likelihood, jitter).fit(X, y)
+            return model.log_evidence_grad()
+        except (np.linalg.LinAlgError, ValueError):
+            return -1e300, np.zeros_like(theta)
+
+    best, history = adam_maximize(
+        value_and_grad, theta0, lr=lr, steps=steps, callback=callback
+    )
+    kernel.theta = best
+    return LaplaceGP(kernel, likelihood, jitter).fit(X, y), history

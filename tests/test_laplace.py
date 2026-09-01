@@ -7,7 +7,7 @@ approximation is simply near it. So the testing strategy is different: pin the
 algebra against cases where the exact answer is known, then measure the error
 where it is not.
 
-Four groups.
+Five groups.
 
 1. **The likelihoods**, elementwise: every derivative against central
    differences, the stable log-sigmoid against the naive one where the naive one
@@ -24,6 +24,13 @@ Four groups.
    importance sampler in ``experiments/laplace.py`` is what judges the
    approximation, so it is itself checked on a Gaussian likelihood, where
    ``p(y)`` is the exact log marginal likelihood.
+5. **The evidence gradient**, which is the piece most able to be plausibly
+   wrong. Dropping the implicit term, or taking R&W (5.23)'s printed sign,
+   leaves a vector that points roughly the right way and is not the gradient.
+   So it is checked three ways: against the exact GP's own gradient where the
+   Laplace evidence is exact, against central differences of the objective for
+   likelihoods where it is not, and by confirming that the wrong sign *fails*
+   that same check -- otherwise the test is not testing the sign.
 """
 
 import sys
@@ -37,8 +44,9 @@ sys.path.insert(0, str(ROOT / "experiments"))
 
 from gp.gp import GPRegressor  # noqa: E402
 from gp.kernels import RBF, Matern  # noqa: E402
+from gp.kernels import RationalQuadratic  # noqa: E402
 from gp.laplace import (Bernoulli, GaussianLikelihood, LaplaceGP,  # noqa: E402
-                        Poisson, grid_search)
+                        Poisson, grid_search, maximize_evidence)
 
 LIKS = [
     ("bernoulli", Bernoulli(), np.array([1.0, -1.0, 1.0, -1.0, 1.0])),
@@ -384,3 +392,233 @@ def test_a_second_kernel_family_works_too():
     assert m.fit_.stationarity(m.likelihood, m.y) < 1e-9
     p, _ = m.predict_prob(np.linspace(-3, 3, 11).reshape(-1, 1))
     assert np.all((p > 0) & (p < 1))
+
+
+# ---------------------------------------------------------------------------
+# 5. the evidence gradient
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("name,lik,y", LIKS)
+def test_third_derivative_by_finite_differences(name, lik, y):
+    h = 1e-5
+    fd = (lik.d2(y, F + h) - lik.d2(y, F - h)) / (2 * h)
+    np.testing.assert_allclose(fd, lik.d3(y, F), rtol=1e-6, atol=1e-7)
+
+
+def test_bernoulli_third_derivative_vanishes_at_the_undecided_point():
+    """d3 is odd about f = 0, so the implicit term of the evidence gradient
+    switches sign exactly where the classifier is undecided."""
+    lik = Bernoulli()
+    y = np.ones(3)
+    assert lik.d3(y, np.array([0.0]))[0] == pytest.approx(0.0, abs=1e-15)
+    a = lik.d3(y, np.array([1.3]))
+    b = lik.d3(y, np.array([-1.3]))
+    np.testing.assert_allclose(a, -b, rtol=1e-12)
+
+
+def _grad_data(n=25, seed=3):
+    """One design, three sets of targets -- one per likelihood."""
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, 1))
+    f = 1.5 * np.sin(2.0 * X[:, 0])
+    return (
+        X,
+        {
+            "poisson": (Poisson(), rng.poisson(np.exp(f)).astype(float)),
+            "bernoulli": (Bernoulli(),
+                          (rng.uniform(size=n) < 1 / (1 + np.exp(-f))).astype(float)),
+            "gaussian": (GaussianLikelihood(0.04), f + 0.2 * rng.normal(size=n)),
+        },
+    )
+
+
+def _fd_evidence_grad(kernel_factory, lik, X, y, eps=1e-3):
+    """Central differences of the objective the gradient claims to differentiate.
+
+    ``eps = 1e-3`` and a tight Newton tolerance, both deliberate. The Newton
+    iteration stops on an increase in ``Psi``, so ``log_ml`` carries noise at
+    the size of that tolerance; differencing it divides that noise by ``2 eps``.
+    At the module default (1e-10) and ``eps = 1e-6`` the noise floor is ~5e-5
+    and swamps the answer -- a convergence study over eps confirms the
+    difference is converging at the O(eps^2) rate to the analytic value, and
+    then stops when the noise takes over. So: tolerance to 1e-12, and stay in
+    the regime where truncation, not noise, dominates.
+    """
+    theta0 = kernel_factory().theta.copy()
+    out = []
+    for i in range(len(theta0)):
+        vals = []
+        for sign in (+1.0, -1.0):
+            k = kernel_factory()
+            t = theta0.copy()
+            t[i] += sign * eps
+            k.theta = t
+            vals.append(LaplaceGP(k, lik).fit(X, y, tol=1e-12, max_iter=500)
+                        .log_marginal_likelihood())
+        out.append((vals[0] - vals[1]) / (2 * eps))
+    return np.array(out)
+
+
+KERNEL_FACTORIES = [
+    ("rbf", lambda: RBF(s2=1.2, l=0.9)),
+    ("matern32", lambda: Matern(nu=1.5, s2=1.5, l=1.2)),
+    ("matern52", lambda: Matern(nu=2.5, s2=1.5, l=1.0)),
+    ("rq", lambda: RationalQuadratic(s2=1.3, l=1.0, alpha=2.0)),
+    ("sum", lambda: RBF(s2=0.8, l=0.5) + Matern(nu=1.5, s2=0.6, l=1.5)),
+]
+
+
+@pytest.mark.parametrize("lik_name", ["poisson", "bernoulli", "gaussian"])
+@pytest.mark.parametrize("kernel_name,factory", KERNEL_FACTORIES)
+def test_evidence_gradient_matches_finite_differences(lik_name, kernel_name,
+                                                      factory):
+    X, targets = _grad_data()
+    lik, y = targets[lik_name]
+    model = LaplaceGP(factory(), lik).fit(X, y, tol=1e-12, max_iter=500)
+    _, analytic = model.log_evidence_grad()
+    numeric = _fd_evidence_grad(factory, lik, X, y)
+    np.testing.assert_allclose(analytic, numeric, rtol=2e-5, atol=1e-7)
+
+
+def test_evidence_gradient_equals_the_exact_gp_gradient_under_a_gaussian():
+    """The anchor. With a Gaussian likelihood the Laplace evidence *is* the
+    exact one, the implicit term is exactly zero (d3 == 0), and the remaining
+    two terms must reproduce ``GPRegressor.lml_and_grad`` -- computed by
+    entirely separate code, through K's own Cholesky rather than B's."""
+    X, targets = _grad_data()
+    lik, y = targets["gaussian"]
+    for kernel_name, factory in KERNEL_FACTORIES:
+        value, grad = LaplaceGP(factory(), lik).fit(X, y).log_evidence_grad()
+        exact = GPRegressor(factory(), noise_var=lik.noise_var)
+        v_exact, g_exact = exact.lml_and_grad(X, y)
+        assert value == pytest.approx(v_exact, abs=1e-8), kernel_name
+        # lml_and_grad appends the noise gradient; the kernel entries come first
+        np.testing.assert_allclose(grad, g_exact[:len(grad)], atol=1e-7)
+
+
+def test_dropping_the_implicit_term_would_fail_the_finite_difference_check():
+    """Guards the part of the derivation that is easy to leave out.
+
+    The explicit two terms alone are a perfectly plausible gradient -- they are
+    exactly right under a Gaussian likelihood -- so a test that only checked
+    the Gaussian case would pass with the implicit term deleted. Here it is
+    deleted by hand and the check must fail, which is what makes the passing
+    check above evidence of anything.
+    """
+    X, targets = _grad_data()
+    lik, y = targets["poisson"]
+    model = LaplaceGP(RBF(s2=1.2, l=0.9), lik).fit(X, y, tol=1e-12, max_iter=500)
+    _, full = model.log_evidence_grad()
+
+    fit = model.fit_
+    K, a = model.K, fit.a
+    sW = np.sqrt(fit.W)
+    R = sW[:, None] * np.linalg.solve(fit.L @ fit.L.T, np.diag(sW))
+    explicit_only = np.array([
+        0.5 * float(a @ (dK @ a)) - 0.5 * float(np.sum(R * dK))
+        for dK in model.kernel.grads(model.X)
+    ])
+    numeric = _fd_evidence_grad(lambda: RBF(s2=1.2, l=0.9), lik, X, y)
+
+    np.testing.assert_allclose(full, numeric, rtol=2e-5, atol=1e-7)
+    assert not np.allclose(explicit_only, numeric, rtol=1e-3, atol=1e-4)
+
+
+def test_the_other_sign_of_the_implicit_term_would_fail_too():
+    """R&W (5.23) prints the opposite sign to the one used here. Only one of
+    the two can differentiate the objective, and this says which."""
+    X, targets = _grad_data()
+    lik, y = targets["bernoulli"]
+    factory = lambda: RBF(s2=1.2, l=0.9)  # noqa: E731
+    model = LaplaceGP(factory(), lik).fit(X, y, tol=1e-12, max_iter=500)
+    _, full = model.log_evidence_grad()
+    numeric = _fd_evidence_grad(factory, lik, X, y)
+
+    fit = model.fit_
+    K, a = model.K, fit.a
+    sW = np.sqrt(fit.W)
+    R = sW[:, None] * np.linalg.solve(fit.L @ fit.L.T, np.diag(sW))
+    R = 0.5 * (R + R.T)
+    diag_cov = np.diag(K) - np.einsum("ij,ji->i", K @ R, K)
+    # the same computation with the sign of dlog/dfhat flipped
+    dlog_df = -0.5 * diag_cov * lik.d3(model.y, fit.f)
+    u = dlog_df - R @ (K @ dlog_df)
+    flipped = np.array([
+        0.5 * float(a @ (dK @ a)) - 0.5 * float(np.sum(R * dK))
+        + float(u @ (dK @ a))
+        for dK in model.kernel.grads(model.X)
+    ])
+
+    np.testing.assert_allclose(full, numeric, rtol=2e-5, atol=1e-7)
+    assert not np.allclose(flipped, numeric, rtol=1e-3, atol=1e-4)
+
+
+def test_fixed_parameters_are_absent_from_the_gradient():
+    """A frozen hyperparameter must not appear in ``theta`` or in the gradient
+    -- the same contract ``Kernel.grads`` has, carried through the derivation."""
+    X, targets = _grad_data()
+    lik, y = targets["bernoulli"]
+    factory = lambda: RBF(s2=2.0, l=1.0, fixed=["s2"])  # noqa: E731
+    model = LaplaceGP(factory(), lik).fit(X, y, tol=1e-12, max_iter=500)
+    _, grad = model.log_evidence_grad()
+    assert grad.shape == (1,)
+    np.testing.assert_allclose(grad, _fd_evidence_grad(factory, lik, X, y),
+                               rtol=2e-5, atol=1e-7)
+
+
+def test_gradient_ascent_reaches_at_least_the_grid_optimum():
+    """The point of having the gradient: it is not restricted to grid points.
+
+    The grid's argmax is a lower bound on the achievable evidence, so ascent
+    from a neutral start has to at least match it, and should beat it slightly
+    by landing between grid points.
+    """
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(60, 1))
+    f = 1.8 * np.sin(2.2 * X[:, 0])
+    y = (rng.uniform(size=60) < 1 / (1 + np.exp(-f))).astype(float)
+
+    grids = (np.exp(np.linspace(np.log(0.2), np.log(50.0), 25)),
+             np.exp(np.linspace(np.log(0.1), np.log(5.0), 25)))
+    _, grid_best, _ = grid_search(lambda s2, l: RBF(s2=s2, l=l), Bernoulli(),
+                                  X, y, grids)
+
+    kernel = RBF(s2=1.0, l=1.0)
+    model, history = maximize_evidence(kernel, Bernoulli(), X, y,
+                                       lr=0.08, steps=250)
+    assert model.log_marginal_likelihood() >= grid_best
+    assert history[-1] >= history[0]
+    # and the optimizer left the kernel at the parameters it reports
+    assert model.log_marginal_likelihood() == pytest.approx(max(history), abs=1e-9)
+
+
+def test_maximize_evidence_survives_a_solve_that_fails():
+    """A step whose Newton solve fails must cost a step, not the run.
+
+    Triggered by injection rather than by a hyperparameter, and the reason is
+    worth recording: the solve turned out very hard to break from the outside.
+    A Poisson model at a prior amplitude of ``exp(700)`` still converges, because
+    the line search halves the step until ``Psi`` increases and an absurd
+    amplitude just means more halvings. So the guard cannot be reached by
+    choosing a bad theta in this range, and testing it honestly means making the
+    fit raise.
+    """
+    rng = np.random.default_rng(11)
+    X = rng.normal(size=(20, 1))
+    y = rng.poisson(2.0, size=20).astype(float)
+
+    class Brittle(Poisson):
+        """Raises on the first evaluation, then behaves."""
+        calls = 0
+
+        def d2(self, y, f):
+            Brittle.calls += 1
+            if Brittle.calls == 1:
+                raise np.linalg.LinAlgError("injected failure")
+            return super().d2(y, f)
+
+    kernel = RBF(s2=1.0, l=1.0)
+    model, history = maximize_evidence(kernel, Brittle(), X, y, lr=0.1, steps=20)
+    assert Brittle.calls > 1                       # the failure really happened
+    assert history[0] == -1e300                    # and it cost exactly one step
+    assert np.isfinite(model.log_marginal_likelihood())
+    assert max(history) > -1e299
