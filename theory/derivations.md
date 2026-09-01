@@ -1430,23 +1430,132 @@ than $\sigma(\mu_*)$ at every point. Sec. 16 measures a gap of 0.078 in
 probability where the approximation's own error against the exact answer is
 0.034 — the shortcut costs more than the approximation does.
 
-### 10.5 What is missing here, and why it is not small
+### 10.5 Hyperparameter gradients: the implicit term, and its sign
 
-There are no derivatives of (10.4) with respect to the hyperparameters in this
-repo, so ML-II is a grid search. The reason is not laziness about the algebra
-but its shape: $\hat f$ is itself a function of $\theta$, so
+$\hat f$ is itself a function of $\theta$, so the derivative of (10.4) is not
+the derivative of its explicit $\theta$-dependence:
 
 $$\frac{d \log \hat Z}{d\theta_j}
 = \underbrace{\frac{\partial \log \hat Z}{\partial \theta_j}}_{\text{explicit}}
 + \sum_i \underbrace{\frac{\partial \log \hat Z}{\partial \hat f_i}
-\frac{\partial \hat f_i}{\partial \theta_j}}_{\text{implicit}} ,$$
+\frac{\partial \hat f_i}{\partial \theta_j}}_{\text{implicit}} .$$
 
-and the implicit term does not vanish — $\hat f$ maximizes $\Psi$, not $\log
-\hat Z$, and the two differ by the log-determinant. Working it out needs
-$\partial \hat f / \partial\theta$ from differentiating the mode equation, and
-that brings in the likelihood's **third** derivative through $\partial W /
-\partial f$ (Rasmussen & Williams, Alg. 5.1). It is a real derivation, not a
-line, and it is the next gap this section opens.
+The implicit term does not vanish, and the reason is worth being exact about:
+$\hat f$ is a stationary point of $\Psi$, not of $\log\hat Z$, and the two
+differ by $-\tfrac12\log|B|$, whose $W$ is evaluated *at the mode*. Move the
+mode and the determinant moves with it.
+
+**The explicit part.** Hold $\hat f$, hence $W$, fixed. Only
+$-\tfrac12 \hat f^\top K^{-1}\hat f$ and $\log|B|$ see $\theta$. With
+$a = K^{-1}\hat f$, the first gives $\tfrac12 a^\top \frac{\partial K}{\partial\theta_j} a$.
+For the second, split $|B| = |I + KW| = |K|\,|K^{-1}+W|$ and differentiate both
+factors:
+
+$$-\tfrac12\operatorname{tr}\!\left(K^{-1}\frac{\partial K}{\partial\theta_j}\right)
++ \tfrac12\operatorname{tr}\!\left(K^{-1}(K^{-1}+W)^{-1}K^{-1}\frac{\partial K}{\partial\theta_j}\right)
+= -\tfrac12\operatorname{tr}\!\left((K + W^{-1})^{-1}\frac{\partial K}{\partial\theta_j}\right),$$
+
+the last step being Woodbury, $K^{-1} - K^{-1}(K^{-1}+W)^{-1}K^{-1} = (K+W^{-1})^{-1}$.
+So
+
+$$\boxed{\ \frac{\partial \log \hat Z}{\partial \theta_j}
+= \tfrac12 a^\top \frac{\partial K}{\partial\theta_j} a
+- \tfrac12 \operatorname{tr}\!\left(R\,\frac{\partial K}{\partial\theta_j}\right),
+\qquad R \equiv (K + W^{-1})^{-1} = W^{1/2}B^{-1}W^{1/2}.\ }$$
+
+$R$ is the same $B$-Cholesky the fit already has, so $K$ is still never
+factorized — the point Sec. 10.2 made about the mode, carried through to the
+gradient.
+
+**Sensitivity to the mode.** $\Psi$ is stationary at $\hat f$, so only the
+determinant contributes. Using $|B| = |K|\,|K^{-1}+W|$ again, with $K$ free of
+$\hat f$:
+
+$$\frac{\partial \log \hat Z}{\partial \hat f_i}
+= -\tfrac12 \operatorname{tr}\!\left((K^{-1}+W)^{-1}\frac{\partial W}{\partial \hat f_i}\right)
+= -\tfrac12 \left[(K^{-1}+W)^{-1}\right]_{ii} \frac{\partial W_i}{\partial \hat f_i},$$
+
+$W$ being diagonal. And $W = -\nabla\nabla\log p(y|f)$ gives
+$\partial W_i/\partial \hat f_i = -\partial^3 \log p(y|\hat f)/\partial f_i^3$,
+so the two minus signs cancel:
+
+$$\boxed{\ \frac{\partial \log \hat Z}{\partial \hat f_i}
+= +\tfrac12 \left[(K^{-1}+W)^{-1}\right]_{ii}\,
+\frac{\partial^3 \log p(y|\hat f)}{\partial f_i^3}.\ }$$
+
+R&W (5.23) prints this with a minus sign while defining $W = -\nabla\nabla\log p$
+on the previous page; the two are not consistent, and GPML's `infLaplace` uses
+the $+\tfrac12$ form. Rather than pick by authority, `tests/test_laplace.py`
+runs the flipped sign against a central difference of $\log\hat Z$ itself and
+requires it to *fail* — the wrong sign yields a vector that points broadly the
+right way, which is exactly why it survives a casual check.
+
+**Sensitivity of the mode to $\theta$.** Differentiate the mode equation
+$\hat f = K\,\nabla\log p(y|\hat f)$ (Sec. 10.1) in $\theta_j$, remembering that
+$\nabla\log p$ is evaluated at $\hat f$:
+
+$$\frac{\partial \hat f}{\partial\theta_j}
+= \frac{\partial K}{\partial\theta_j}a - KW\frac{\partial \hat f}{\partial\theta_j}
+\quad\Longrightarrow\quad
+\frac{\partial \hat f}{\partial\theta_j}
+= (I + KW)^{-1}\frac{\partial K}{\partial\theta_j}a .$$
+
+And $(I+KW)^{-1} = I - KR$ — check by expanding, using $R = (I+WK)^{-1}W$ — so
+the implicit term costs nothing new: the same $R$, and no $W^{-1}$ anywhere.
+That last point is not cosmetic. A confidently-classified Bernoulli point has
+$W_i$ at $10^{-16}$, and $W^{-1}$ would be the only badly conditioned object in
+a derivation that has otherwise been careful to avoid one.
+
+The diagonal $[(K^{-1}+W)^{-1}]_{ii}$ is read off $K - KRK$ (Woodbury once
+more). Total cost: one extra $O(n^3)$ for $R$ and $KR$, then $O(n^2)$ per
+hyperparameter — against $O(n^3)$ *per grid point*, so the gradient pays for
+itself at three grid points and its cost is flat in the parameter count where
+the grid's is exponential.
+
+Implemented as `LaplaceGP.log_evidence_grad`, with `maximize_evidence` running
+Adam on it. Three checks, because this is the piece most able to be plausibly
+wrong: it reproduces `GPRegressor.lml_and_grad` to $10^{-8}$ under a Gaussian
+likelihood (where $\partial^3\log p = 0$, so the implicit term is exactly zero
+and only the explicit box is being tested); it matches central differences to
+$2\times10^{-5}$ relative for Bernoulli and Poisson across five kernel families
+(where it is not); and deleting the implicit term, or flipping its sign, fails
+that same check.
+
+**Measured (`experiments/laplace.py`, §5).** On 24 points with 15% flipped
+labels, an RBF kernel: the $21\times17$ grid spends 357 fits and reports
+$\log\hat Z = -14.7613$; Adam from three different starts spends 250 each and
+all three land on $(\hat s^2, \hat\ell) = (2.481, 0.762)$ at $-14.7513$. Same
+optimum, found between grid points, and no sign of the multimodality Sec. 9
+found under a Gaussian likelihood — on *this* surface.
+
+The three-parameter case is the one that argues for the gradient, and it argues
+for something more specific than speed. A $13^3$ RationalQuadratic grid spends
+$2197$ fits and returns $\alpha = 50$ — **the top of its own grid**, which
+`on_edge` flags. Adam spends 250 and beats it ($-14.7515$ against $-14.7708$),
+but the three ascents finish at $\alpha = 57.8$, $63.6$ and $771$ while agreeing
+on $s^2$ and $\ell$ to three digits and on the evidence to $0.003$ nats. Neither
+method resolves $\alpha$, and the reason is structural rather than numerical:
+$\text{RQ} \to \text{RBF}$ as $\alpha\to\infty$, so the evidence really is flat
+in that direction and there is no interior optimum to find. The gradient's
+contribution is that it makes the flatness visible in a few hundred fits instead
+of hiding it behind a boundary argmax.
+
+### 10.6 What is missing here, and why it is not small
+
+**Expectation propagation is not implemented.** On binary classification EP is
+usually the more accurate approximation, and often by more than the gap Sec. 16
+measures — so those numbers are what *Laplace* costs, not what approximate
+inference costs.
+
+**Nothing here is sparse.** Every quantity above factorizes an $n\times n$
+matrix, so the inducing-point machinery of Sec. 9 and this section do not meet:
+there is no sparse GP classifier in this repo, which is what the combination
+would be and what most of the applied literature actually uses.
+
+**The oracle runs out before the method does.** The importance sampler that
+judges all of this draws from the prior, and its effective sample size falls
+below 0.5% by $n = 32$ (Sec. 16), so the error measurements stop where the
+sampler stops rather than where the approximation does.
 
 ---
 
