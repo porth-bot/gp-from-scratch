@@ -27,7 +27,7 @@ Run:  python experiments/multistart.py
 
 import numpy as np
 
-from common import savefig
+from common import save_results, savefig
 import matplotlib.pyplot as plt
 
 from gp.gp import GPRegressor
@@ -133,6 +133,34 @@ def main():
     axR.legend(loc="lower center", fontsize=7.5)
 
     savefig(fig, "multistart.png")
+
+    save_results("multistart", {
+        "signal_single_start": {
+            "lml": lml_signal,
+            "l": np.exp(signal.kernel.theta[1]),
+            "noise_var": signal.noise_var,
+        },
+        "noise_single_start": {
+            "lml": lml_noise,
+            "l": np.exp(noise.kernel.theta[1]),
+            "noise_var": noise.noise_var,
+        },
+        "multistart": {
+            "lml": res.lml,
+            "l": l_star,
+            "s2": s2_star,
+            "noise_var": noise_star,
+            "best_restart": int(res.best_restart),
+            "n_restarts": int(len(res.lmls)),
+            "n_finite": int(finite.size),
+            "lml_min_finite": finite.min(),
+            "lml_max_finite": finite.max(),
+        },
+        # The profile that the right panel plots, so "one sharp peak, then a
+        # long flat plateau" is a claim about numbers on disk rather than a
+        # claim about a picture.
+        "profile": {"l": ls, "lml": prof},
+    })
     return res
 
 

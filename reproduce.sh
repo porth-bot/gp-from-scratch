@@ -114,7 +114,12 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # reported a brand-new figure as "the repo is shipping figures its own code
     # no longer produces", which is exactly the false alarm that trains people
     # to ignore the check.
-    changed=$(git status --porcelain -- figures/ \
+    # logs/ is checked the same way, and for the same reason one step further
+    # on: tests/test_readme_numbers.py holds the README's tables against those
+    # JSON files, so a log that drifts from what the code now produces would
+    # let the test go on passing against a stale measurement. No log plots a
+    # clock, so none of them is whitelisted below.
+    changed=$(git status --porcelain -- figures/ logs/ \
         | awk '{ y = substr($0, 2, 1); if (y == "M" || substr($0,1,2) == "??") print $2 }')
     unexpected=""
     for f in ${changed}; do
@@ -125,14 +130,14 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     done
     echo
     if [ -z "${changed}" ]; then
-        echo "reproduction: every committed figure came back byte-for-byte."
+        echo "reproduction: every committed figure and log came back byte-for-byte."
         echo "(Even the two wall-clock plots landed on identical bytes here.)"
     elif [ -z "${unexpected}" ]; then
         echo "reproduction: byte-for-byte except the wall-clock plots, as documented:"
         for f in ${changed}; do echo "    ${f}   (plots timing; machine-dependent)"; done
     else
         echo "reproduction: UNEXPECTED drift -- these differ from the committed copies"
-        echo "and do not plot wall-clock, so the repo is shipping figures its own"
+        echo "and do not plot wall-clock, so the repo is shipping artifacts its own"
         echo "code no longer produces. Inspect, then commit the regenerated files:"
         for f in ${unexpected}; do echo "    ${f}"; done
         echo "(the wall-clock plots may also differ; that is expected: ${TIMING_FIGURES})"

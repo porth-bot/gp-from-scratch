@@ -16,7 +16,7 @@ Run:  python experiments/validate.py
 
 import numpy as np
 
-from common import plt, savefig
+from common import plt, save_results, savefig
 from gp.gp import GPRegressor
 from gp.kernels import RBF, Matern
 from gp.optimize import adam_maximize
@@ -68,7 +68,18 @@ def calibration_curve():
     ax.set_title("Credible intervals mean what they say", loc="left")
     ax.legend(loc="upper left", fontsize=8)
     savefig(fig, "calibration.png")
-    print(f"95% nominal -> {float((np.abs(z) < 1.96).mean()):.3f} empirical")
+    coverage95 = float((np.abs(z) < 1.96).mean())
+    print(f"95% nominal -> {coverage95:.3f} empirical")
+    return {
+        "n_functions": 40,
+        "n_zscores": int(z.size),
+        # The README's table quotes this one: the share of z-scores inside the
+        # fixed +-1.96 band, not the curve's own 40-point nominal grid (which
+        # bisects for c_q and does not land on 0.95 exactly).
+        "coverage_at_nominal_95": coverage95,
+        "curve_nominal": nominal.tolist(),
+        "curve_empirical": empirical,
+    }
 
 
 def hyperparameter_recovery():
@@ -100,8 +111,15 @@ def hyperparameter_recovery():
     axes[0].legend(fontsize=8)
     fig.suptitle("ML-II estimates across 8 replicate datasets (log scale)", y=1.05)
     savefig(fig, "hyperparam_recovery.png")
-    print("median estimates (s2, l, noise):", np.round(np.median(est, axis=0), 3),
+    median = np.median(est, axis=0)
+    print("median estimates (s2, l, noise):", np.round(median, 3),
           "| truth:", (true["s2"], true["l"], true_noise))
+    return {
+        "n_replicates": est.shape[0],
+        "truth": {"s2": true["s2"], "l": true["l"], "noise_var": true_noise},
+        "median": {"s2": median[0], "l": median[1], "noise_var": median[2]},
+        "estimates": est,
+    }
 
 
 def lml_surface():
@@ -144,6 +162,7 @@ def lml_surface():
 
 
 if __name__ == "__main__":
-    calibration_curve()
-    hyperparameter_recovery()
+    calibration = calibration_curve()
+    recovery = hyperparameter_recovery()
     lml_surface()
+    save_results("validate", {"calibration": calibration, "recovery": recovery})
