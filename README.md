@@ -440,20 +440,23 @@ long-lengthscale start lands in the *worse* one:
 
 | fit | lengthscale $\ell$ | noise $\sigma^2$ | log evidence |
 |---|---|---|---|
-| signal-mode single start | 1.29 | ~0 | **−5.40** |
-| noise-mode single start | 98 | 0.58 | −13.74 |
-| **multi-start** (from the noise init) | 1.29 | ~0 | **−5.40** |
+| signal-mode single start | 1.287 | ~0 | **−5.40** |
+| noise-mode single start | 98.2 | 0.58 | −13.74 |
+| **multi-start** (from the noise init) | 1.285 | ~0 | **−5.40** |
 
 `gp.optimize.maximize_lml_multistart` runs Adam ML-II from several log-space
 initializations — the model's own parameters plus draws sampled uniformly in a
 log-space box (the same strategy as scikit-learn's `n_restarts_optimizer`) — and
 keeps the highest-evidence fit. Started in the noise basin, it still recovers the
-signal optimum (+8.3 nats), and with `keep_init=True` restart 0 is the model's
-own parameters, so it can never return worse evidence than the single fit it
-wraps. The right panel profiles the evidence along the lengthscale (freezing
-$\ell$ on a grid via the fixed-parameter mask and optimizing $\sigma_f^2,
-\sigma^2$ at each point): one sharp peak at the signal lengthscale, a long flat
-plateau where the model has given up and called everything noise.
+signal optimum (+8.3 nats): the two short-$\ell$ rows are separate Adam runs
+from different initializations, so they land 0.002 apart in $\ell$ and 0.0003
+apart in log evidence rather than on identical parameters. With
+`keep_init=True` restart 0 is the model's own parameters, so it can never
+return worse evidence than the single fit it wraps. The right panel profiles
+the evidence along the lengthscale (freezing $\ell$ on a grid via the
+fixed-parameter mask and optimizing $\sigma_f^2, \sigma^2$ at each point): one
+sharp peak at the signal lengthscale, a long flat plateau where the model has
+given up and called everything noise.
 
 <p align="center"><img src="figures/multistart.png" width="960"></p>
 
@@ -1190,7 +1193,7 @@ machine — §14 measured how little wall clock reproduces, so read them as orde
 of magnitude):
 
 ```bash
-pytest                          # 369 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 382 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -1212,7 +1215,13 @@ python sparse2d.py              # ~12 min (sparse GPs one dimension up; the long
 python laplace.py               # ~133 s (Laplace vs an oracle; + ML-II by gradient vs grid)
 ```
 
-Figures land in `figures/`; every table above is printed by the scripts.
+Figures land in `figures/`. Every table above is printed by the scripts, and
+the sections that have been instrumented so far also write their numbers to
+`logs/<experiment>.json`, which `tests/test_readme_numbers.py` checks this
+README's tables against and `reproduce.sh` checks for drift alongside the
+figures. Two of the sixteen sections are covered so far; the test names the
+rest, so the gap is visible rather than assumed away.
+
 Seeds are fixed. The only data file, `data/co2_mm_mlo.txt` (the Mauna Loa
 monthly record), is committed, so there is nothing to download.
 
