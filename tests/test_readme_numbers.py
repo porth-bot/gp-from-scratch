@@ -13,26 +13,36 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers two of the sixteen sections so far**, and `NOT_YET` below names the
-other fourteen explicitly rather than leaving the hole to be discovered:
+**It covers six of the sixteen sections so far**, and `NOT_YET` below names the
+other ten explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
-experiments learn to write logs; the two here are the two whose scripts run in
-about ten seconds each, which is why they came first.
+experiments learn to write logs, cheapest script first: §§1 and 9 arrived
+together, then §§4 to 7, all of whose scripts finish in seconds.
 
-The first run made it four repos for four. §1 came back clean: the coverage
-cell, the three recovery medians and both replicate counts all round to what is
-printed. §9 did not. Its table gave the multi-start fit a lengthscale of 1.29,
-which is the *signal-mode* fit's value; the multi-start fit is at 1.2845, so it
-rounds to 1.28. The two are separate Adam runs from different initializations
-that land in the same basin, and the table presented them as landing on the
-same parameters. The mechanism is a double rounding rather than a transcription
-slip: `multistart.py` prints the lengthscale to three decimals, and 1.285
-rounded up by hand becomes 1.29 while the number it came from does not. So the
-fix is not just the one cell -- all three lengthscales now carry the precision
-the script prints, which is the only version of that table where the rounding
-cannot be done twice.
+**Three drifted cells so far, and all three are the same mistake.** Every one
+is a number rounded once by the script and then rounded again by hand, in the
+direction that flattered the section:
+
+* §9 gave the multi-start fit a lengthscale of 1.29, which is the *signal-mode*
+  fit's value. `multistart.py` prints three decimals, and 1.285 rounded up by
+  hand becomes 1.29 while the 1.2845 behind it goes down to 1.28. The two rows
+  are separate Adam runs that land in the same basin, and the table presented
+  them as landing on identical parameters.
+* §5's two-stage fit covered 0.965 on the noisy half, printed at three decimals
+  and typed as 0.96.
+* §4's n=100 max|dstd| read 1.6e-10 for a measured 1.6512e-10.
+
+The fix in each case is to quote the precision the script prints, not to nudge
+the last digit, because a table written to one digit fewer than the run reports
+invites the same error again. §§1, 6 and 7 came back clean.
+
+Where a column is not the kind of thing a stored number can pin, this file says
+so instead of asserting it: §4's residues move with the BLAS and its
+milliseconds with the machine, so the timings are not logged at all and the
+claim under test is "every residue below 1e-9" rather than the digits. See
+`test_section_4_parity_residues_are_below_the_claimed_order`.
 
 Pure stdlib plus numpy (which the whole suite already needs), so this runs
 wherever the rest of the tests do. No matplotlib, no experiment imports.
@@ -41,6 +51,7 @@ wherever the rest of the tests do. No matplotlib, no experiment imports.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -55,13 +66,17 @@ README = (ROOT / "README.md").read_text()
 # the "### N." the section heading opens with.
 INSTRUMENTED = {
     "validate": "1.",
+    "sklearn_parity": "4.",
+    "heteroscedastic": "5.",
+    "ard": "6.",
+    "spatial2d": "7.",
     "multistart": "9.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
-    "2.", "3.", "4.", "5.", "6.", "7.", "8.",
+    "2.", "3.", "8.",
     "10.", "11.", "12.", "13.", "14.", "15.", "16.",
 ]
 
@@ -114,6 +129,23 @@ def assert_rounds_to(measured: float, printed: str, what: str) -> None:
     assert round(float(measured), decimals) == float(printed), (
         f"{what}: README prints {printed}, the log holds {measured!r}, which "
         f"rounds to {round(float(measured), decimals)} at {decimals} dp"
+    )
+
+
+def assert_formats_to(measured: float, printed: str, what: str) -> None:
+    """Same idea as ``assert_rounds_to``, for a number written as 1.7e-10.
+
+    ``assert_rounds_to`` counts decimals after the point, which is meaningless
+    in scientific notation ("1.7e-10" would read as five). Here the printed
+    string fixes the significant digits and the measurement is reformatted the
+    same way, which is how the cell was produced in the first place.
+    """
+    mantissa = printed.strip().split("e")[0]
+    sig = len(mantissa.split(".")[1]) if "." in mantissa else 0
+    formatted = f"{float(measured):.{sig}e}"
+    assert formatted == printed.strip(), (
+        f"{what}: README prints {printed}, the log holds {measured!r}, which "
+        f"formats to {formatted}"
     )
 
 
@@ -173,6 +205,175 @@ def test_section_1_hyperparameter_recovery_table():
         )
         assert_rounds_to(rec["median"][key], median,
                          f"Sec. 1 median ML-II estimate of {key}")
+
+
+# -- Sec. 4: parity vs scikit-learn (experiments/sklearn_parity.py) ----------
+
+def test_section_4_parity_residues_are_below_the_claimed_order():
+    """The portable half of §4, and the only half worth asserting.
+
+    The residues are the last bits of two different orderings of the same
+    O(n^3) arithmetic, so they move with the BLAS the way the section's
+    millisecond columns move with the machine. "The from-scratch math is
+    correct to ~1e-10" is the claim that survives a rebuild, so that is what is
+    checked here, at every size the script runs rather than only the three the
+    table shows. The timings are not in the log at all.
+    """
+    parity = log("sklearn_parity")["parity"]
+    assert len(parity) >= 3
+    for n, row in parity.items():
+        for col in ("mean_maxdiff", "std_maxdiff"):
+            assert 0.0 <= row[col] < 1e-9, (
+                f"§4 claims agreement to ~1e-10; at n={n} the {col} is "
+                f"{row[col]:.2e}"
+            )
+    claimed = quoted(section("4."), r"correct to ~1e-(\d+)")
+    worst = max(r[c] for r in parity.values() for c in ("mean_maxdiff", "std_maxdiff"))
+    assert worst < 10 ** -(int(claimed) - 1), (
+        f"§4 says ~1e-{claimed}; the worst residue is {worst:.2e}"
+    )
+
+
+def test_section_4_table_cells_match_the_run_that_produced_them():
+    """The typed digits, against the log, on the pinned build only.
+
+    This is the check that caught the n=100 std cell reading 1.6e-10 for a
+    measured 1.6512e-10. It is meaningful because the log and the README were
+    produced by the same pinned environment; a reader on another BLAS should
+    expect these to differ, which is why the log is whitelisted in
+    reproduce.sh and why the test above is the one that carries the claim.
+    """
+    parity = log("sklearn_parity")["parity"]
+    body = section("4.")
+    for n in ("100", "400", "800"):
+        _, mean_cell, std_cell, *_ = cells(body, f"{n} |")
+        assert_formats_to(parity[n]["mean_maxdiff"], mean_cell,
+                          f"§4 n={n} max|dmean|")
+        assert_formats_to(parity[n]["std_maxdiff"], std_cell,
+                          f"§4 n={n} max|dstd|")
+
+
+# -- Sec. 5: heteroscedastic noise (experiments/heteroscedastic.py) ----------
+
+@pytest.mark.parametrize("row,arm", [
+    ("homoscedastic", "homoscedastic"),
+    ("heteroscedastic", "heteroscedastic"),
+])
+def test_section_5_calibration_table(row, arm):
+    d = log("heteroscedastic")[arm]
+    body = section("5.")
+    _, left, right, nll = cells(body, row + " |")
+    # The cells carry a parenthetical ("1.000 (over-covers)"); take the number.
+    for cell, key, label in (
+        (left, "cover_left", "left coverage"),
+        (right, "cover_right", "right coverage"),
+        (nll, "nll", "test NLL"),
+    ):
+        assert_rounds_to(d[key], cell.split()[0], f"§5 {arm} {label}")
+
+
+def test_section_5_the_two_stage_fit_is_the_better_calibrated_one():
+    """The section's actual argument, which no single cell states.
+
+    "The gain is calibration": the homoscedastic fit misses in opposite
+    directions on the two halves while the two-stage fit does not, and it wins
+    on NLL. Checking the ordering means a rerun that reshuffled the numbers
+    could not leave the prose standing.
+    """
+    d = log("heteroscedastic")
+    homo, het = d["homoscedastic"], d["heteroscedastic"]
+    assert homo["cover_left"] > 0.95 > homo["cover_right"], (
+        "§5 says the single-noise fit over-covers on the clean half and "
+        f"under-covers on the noisy one; got {homo['cover_left']:.3f} and "
+        f"{homo['cover_right']:.3f}"
+    )
+    for side in ("cover_left", "cover_right"):
+        assert abs(het[side] - 0.95) < 0.05, (
+            f"§5 calls the two-stage fit well-calibrated across the domain; "
+            f"{side} is {het[side]:.3f}"
+        )
+    assert het["nll"] < homo["nll"]
+
+
+def test_section_5_the_log_chi_squared_bias_matches_its_closed_form():
+    """E[log chi^2_1] = psi(1/2) + log 2, which is -(gamma + log 2).
+
+    The correction is a hand-typed constant in both the script and the prose,
+    and it has a closed form, so nothing has to take it on trust. psi(1/2) =
+    -gamma - 2 log 2, so the whole thing collapses to -(gamma + log 2) and
+    needs no digamma (this package is NumPy-only).
+    """
+    d = log("heteroscedastic")
+    exact = -(float(np.euler_gamma) + math.log(2.0))
+    assert_rounds_to(exact, f"{d['log_chi2_1_bias']:.4f}",
+                     "the log-chi^2_1 bias the script applies")
+    printed = quoted(section("5."), r"\\log\\chi\^2_1\]=(-[\d.]+)")
+    assert_rounds_to(exact, printed, "§5's quoted E[log chi^2_1]")
+
+
+# -- Sec. 6: ARD (experiments/ard.py) ----------------------------------------
+
+def test_section_6_relevance_table():
+    d = log("ard")
+    body = section("6.")
+    _, l0, l1 = cells(body, r"learned $\ell_d$")
+    assert_rounds_to(d["ard"]["l"][0], l0, "§6 relevant-axis lengthscale")
+    assert_rounds_to(d["ard"]["l"][1], l1, "§6 noise-axis lengthscale")
+    _, r0, r1 = cells(body, "relevance")
+    assert_rounds_to(d["ard"]["relevance"][0], r0, "§6 relevant-axis relevance")
+    assert_rounds_to(d["ard"]["relevance"][1], r1, "§6 noise-axis relevance")
+    # The relevance column has to be the reciprocal of the one above it.
+    for l, r in zip(d["ard"]["l"], d["ard"]["relevance"]):
+        assert abs(1.0 / l - r) < 1e-12
+
+
+def test_section_6_suppression_ratio_and_evidence_gain():
+    d = log("ard")
+    body = section("6.")
+    assert_rounds_to(d["lengthscale_ratio"],
+                     quoted(body, r"driven \*\*(\d+)× larger"),
+                     "§6 lengthscale ratio")
+    assert_rounds_to(d["ard"]["lml"], quoted(body, r"likelihood\n\*\*([\d.]+)\*\* vs"),
+                     "§6 ARD log evidence")
+    assert_rounds_to(d["isotropic"]["lml"],
+                     quoted(body, r"isotropic RBF's \*\*([\d.]+)\*\*"),
+                     "§6 isotropic log evidence")
+    assert d["ard"]["lml"] > d["isotropic"]["lml"], (
+        "ARD nests the isotropic kernel, so it cannot score lower"
+    )
+
+
+# -- Sec. 7: a 2D spatial GP (experiments/spatial2d.py) ----------------------
+
+def test_section_7_accuracy_calibration_and_uncertainty_range():
+    d = log("spatial2d")
+    body = section("7.")
+    assert_rounds_to(d["held_out_rmse"],
+                     cells(body, "held-out RMSE")[1], "§7 held-out RMSE")
+    assert_rounds_to(d["latent_coverage_95"],
+                     cells(body, "latent 95% coverage")[1], "§7 latent coverage")
+    lo, hi = cells(body, "posterior sd, near data")[1].split("→")
+    assert_rounds_to(d["posterior_sd_min"], lo, "§7 posterior sd near data")
+    assert_rounds_to(d["posterior_sd_max"], hi, "§7 posterior sd in the gaps")
+
+
+def test_section_7_the_uncertainty_swells_but_stays_under_the_prior():
+    """§7's point (panel c), as an ordering rather than a picture.
+
+    "the standard deviation collapses at each observation and swells in the
+    gaps and past the domain edges, relaxing toward the prior" -- so the gap
+    value has to sit strictly between the near-data value and the prior sd. It
+    does, and not by a little: 0.019 to 0.113 against a prior 0.204, so the
+    field is still far from having given up where it is guessing most.
+    """
+    d = log("spatial2d")
+    assert d["posterior_sd_min"] < d["posterior_sd_max"] < d["prior_sd"], (
+        f"sd range {d['posterior_sd_min']:.3f}..{d['posterior_sd_max']:.3f} "
+        f"against a prior sd of {d['prior_sd']:.3f}"
+    )
+    # The field's amplitude is ~1 and the RMSE is a few percent of it, which is
+    # the "interpolates" half of the section's claim.
+    assert d["held_out_rmse"] < 0.05
 
 
 # -- Sec. 9: ML-II is non-convex (experiments/multistart.py) -----------------

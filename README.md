@@ -292,13 +292,22 @@ implementation overhead, not worse asymptotics):
 
 | $n$ | max&#124;Δmean&#124; | max&#124;Δstd&#124; | ours (ms) | scikit-learn (ms) | ratio |
 |---|---|---|---|---|---|
-| 100 | 1.7e-10 | 1.6e-10 | 0.5 | 0.5 | 1.1× |
+| 100 | 1.7e-10 | 1.7e-10 | 0.5 | 0.5 | 1.1× |
 | 400 | 4.2e-11 | 1.2e-10 | 3.4 | 1.9 | 1.8× |
 | 800 | 6.7e-11 | 7.8e-11 | 16.8 | 9.5 | 1.8× |
 
 The point is the left two columns: the from-scratch math is correct to ~1e-10,
 and the ~1.8× overhead is the honest price of readable NumPy over a tuned
 library (timings: single core, best of 3).
+
+Read that table as one run, in all six columns and not just the timing three.
+The residues are the last bits of two different orderings of the same $O(n^3)$
+arithmetic, so they belong to the BLAS as much as the seconds belong to the
+machine: the digits above are the pinned environment on Apple Accelerate, and
+another build will put them somewhere else in the same decade.
+`logs/sklearn_parity.json` is whitelisted in `reproduce.sh` for exactly that
+reason, and what the test suite holds this section to is the claim the section
+makes: every residue below 1e-9, at both ends of the size range.
 
 ### 5. Heteroscedastic noise: a two-stage fit (`experiments/heteroscedastic.py`)
 
@@ -317,8 +326,8 @@ intervals should cover 95% *in every region*:
 
 | | left (clean) 95% cover | right (noisy) 95% cover | test NLL |
 |---|---|---|---|
-| homoscedastic | 1.00 (over-covers) | 0.87 (under-covers) | 0.230 |
-| heteroscedastic | 0.96 | 0.96 | **0.013** |
+| homoscedastic | 1.000 (over-covers) | 0.866 (under-covers) | 0.230 |
+| heteroscedastic | 0.960 | 0.965 | **0.013** |
 
 The single-noise fit splits the difference — too conservative on the left,
 overconfident on the right; the two-stage fit tracks the true noise and is
@@ -1193,7 +1202,7 @@ machine — §14 measured how little wall clock reproduces, so read them as orde
 of magnitude):
 
 ```bash
-pytest                          # 382 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 392 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -1219,7 +1228,7 @@ Figures land in `figures/`. Every table above is printed by the scripts, and
 the sections that have been instrumented so far also write their numbers to
 `logs/<experiment>.json`, which `tests/test_readme_numbers.py` checks this
 README's tables against and `reproduce.sh` checks for drift alongside the
-figures. Two of the sixteen sections are covered so far; the test names the
+figures. Six of the sixteen sections are covered so far; the test names the
 rest, so the gap is visible rather than assumed away.
 
 Seeds are fixed. The only data file, `data/co2_mm_mlo.txt` (the Mauna Loa
