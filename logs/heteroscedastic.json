@@ -1,0 +1,16 @@
+{
+  "heteroscedastic": {
+    "cover_left": 0.9595959595959596,
+    "cover_right": 0.9653465346534653,
+    "nll": 0.012527034082668252
+  },
+  "homoscedastic": {
+    "cover_left": 1.0,
+    "cover_right": 0.8663366336633663,
+    "nll": 0.22992624715500484
+  },
+  "log_chi2_1_bias": -1.2704,
+  "n_test": 400,
+  "n_train": 150,
+  "seed": 0
+}

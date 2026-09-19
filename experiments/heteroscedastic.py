@@ -26,7 +26,7 @@ Run:  python experiments/heteroscedastic.py
 """
 
 import numpy as np
-from common import plt, savefig
+from common import plt, save_results, savefig
 
 from gp.gp import GPRegressor, _chol_solve
 from gp.kernels import RBF
@@ -134,6 +134,25 @@ def main():
           f"{m['homo_cover'][1]:>16.3f}{m['homo_nll']:>12.3f}")
     print(f"{'heteroscedastic':14s}{m['hetero_cover'][0]:>16.3f}"
           f"{m['hetero_cover'][1]:>16.3f}{m['hetero_nll']:>12.3f}")
+
+    save_results("heteroscedastic", {
+        "n_train": 150,
+        "n_test": 400,
+        "seed": 0,
+        # The module's own constant, not a literal retyped here, so the test
+        # checks the README against the number the correction actually applies.
+        "log_chi2_1_bias": -LOG_CHI2_BIAS,
+        "homoscedastic": {
+            "cover_left": m["homo_cover"][0],
+            "cover_right": m["homo_cover"][1],
+            "nll": m["homo_nll"],
+        },
+        "heteroscedastic": {
+            "cover_left": m["hetero_cover"][0],
+            "cover_right": m["hetero_cover"][1],
+            "nll": m["hetero_nll"],
+        },
+    })
 
 
 if __name__ == "__main__":

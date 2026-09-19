@@ -18,7 +18,7 @@ Run:  python experiments/ard.py
 
 import numpy as np
 
-from common import plt, savefig
+from common import plt, save_results, savefig
 from gp.gp import GPRegressor
 from gp.kernels import ARD, RBF
 from gp.optimize import adam_maximize
@@ -99,6 +99,20 @@ def main():
     fig.suptitle("ARD automatically suppresses an irrelevant input", x=0.02,
                  ha="left")
     savefig(fig, "ard_relevance.png")
+
+    save_results("ard", {
+        "seed": SEED,
+        "n": X.shape[0],
+        "ard": {
+            "s2": s2,
+            "l": [l0, l1],
+            "relevance": [1.0 / l0, 1.0 / l1],
+            "noise_var": ard.noise_var,
+            "lml": ard.log_marginal_likelihood(),
+        },
+        "isotropic": {"lml": iso.log_marginal_likelihood()},
+        "lengthscale_ratio": l1 / l0,
+    })
 
 
 if __name__ == "__main__":

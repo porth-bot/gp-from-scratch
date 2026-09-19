@@ -16,7 +16,7 @@ Run:  python experiments/sklearn_parity.py
 import time
 
 import numpy as np
-from common import plt, savefig
+from common import plt, save_results, savefig
 
 from gp.gp import GPRegressor
 from gp.kernels import RBF
@@ -90,6 +90,24 @@ def main():
     ax.set_title("Exact-GP parity: identical math, timing overhead only")
     ax.legend()
     savefig(fig, "sklearn_parity.png")
+
+    # The timings deliberately do NOT go in the log. Sec. 14 measured how
+    # little wall clock reproduces here, and this script's figure is one of the
+    # four reproduce.sh excuses for that reason; storing a millisecond count
+    # would make the log machine-dependent and turn every rerun elsewhere into
+    # a drift report. The parity columns are the portable claim, so they are
+    # what gets written down and what the README is held to.
+    save_results("sklearn_parity", {
+        "kernel": {"s2": S2, "l": LENGTHSCALE, "noise_var": NOISE},
+        "n_test_points": 200,
+        "parity": {
+            str(r["n"]): {
+                "mean_maxdiff": r["mean_maxdiff"],
+                "std_maxdiff": r["std_maxdiff"],
+            }
+            for r in rows
+        },
+    })
 
 
 if __name__ == "__main__":

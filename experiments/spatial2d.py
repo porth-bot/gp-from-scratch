@@ -19,7 +19,7 @@ Run:  python experiments/spatial2d.py
 
 import numpy as np
 
-from common import plt, savefig
+from common import plt, save_results, savefig
 from gp.gp import GPRegressor
 from gp.kernels import RBF
 from gp.optimize import adam_maximize
@@ -106,6 +106,20 @@ def main():
         x=0.02, ha="left",
     )
     savefig(fig, "spatial2d.png")
+
+    save_results("spatial2d", {
+        "seed": SEED,
+        "n_train": n,
+        "noise_sd_true": NOISE,
+        "grid_side": g.size,
+        "learned": {"s2": s2, "l": l, "noise_sd": np.sqrt(model.noise_var)},
+        "lml": model.log_marginal_likelihood(),
+        "held_out_rmse": rmse,
+        "latent_coverage_95": cover,
+        "posterior_sd_min": sd.min(),
+        "posterior_sd_max": sd.max(),
+        "prior_sd": np.sqrt(s2),
+    })
 
 
 if __name__ == "__main__":

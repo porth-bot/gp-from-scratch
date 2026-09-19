@@ -32,7 +32,9 @@
 # spread over five runs on one idle machine, so its bytes column (traced NumPy
 # allocations, bit-identical) is the one to read. The portable claims are the
 # accuracy columns: sklearn agreement to ~1e-10, the RFF and SGPR error rates,
-# and the n^2 memory law rather than its prefactor.
+# and the n^2 memory law rather than its prefactor. logs/ is checked the same
+# way as figures/, with one excused file: Sec. 4's parity residues are the last
+# bits of two orderings of the same arithmetic, so they move with the BLAS.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -106,6 +108,13 @@ echo "=================================================================="
 # how figures/co2_forecast.png and figures/ntk_linearization.png sat stale, an
 # older environment's bytes, until someone rebuilt them from a clean clone.
 TIMING_FIGURES="figures/sklearn_parity.png figures/rff.png figures/rff_vs_sparse.png figures/cost_scaling.png"
+# Logs that measure the build rather than the code, excused for the same reason
+# the four figures above are. Only one so far: Sec. 4's parity residues are the
+# last bits of two different orderings of the same O(n^3) arithmetic, so they
+# belong to the BLAS (Accelerate here, OpenBLAS on CI) the way seconds belong
+# to the machine. The portable claim there is "below 1e-9", which
+# tests/test_readme_numbers.py asserts instead of the digits.
+MACHINE_LOGS="logs/sklearn_parity.json"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # Only worktree-vs-index differences count as drift. The porcelain format
     # is XY<space>path, X the index status and Y the worktree's: a figure that
@@ -117,13 +126,13 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # logs/ is checked the same way, and for the same reason one step further
     # on: tests/test_readme_numbers.py holds the README's tables against those
     # JSON files, so a log that drifts from what the code now produces would
-    # let the test go on passing against a stale measurement. No log plots a
-    # clock, so none of them is whitelisted below.
+    # let the test go on passing against a stale measurement. One log is
+    # excused, for the reason MACHINE_LOGS gives above.
     changed=$(git status --porcelain -- figures/ logs/ \
         | awk '{ y = substr($0, 2, 1); if (y == "M" || substr($0,1,2) == "??") print $2 }')
     unexpected=""
     for f in ${changed}; do
-        case " ${TIMING_FIGURES} " in
+        case " ${TIMING_FIGURES} ${MACHINE_LOGS} " in
             *" ${f} "*) ;;
             *) unexpected="${unexpected} ${f}" ;;
         esac
@@ -133,14 +142,16 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         echo "reproduction: every committed figure and log came back byte-for-byte."
         echo "(Even the two wall-clock plots landed on identical bytes here.)"
     elif [ -z "${unexpected}" ]; then
-        echo "reproduction: byte-for-byte except the wall-clock plots, as documented:"
-        for f in ${changed}; do echo "    ${f}   (plots timing; machine-dependent)"; done
+        echo "reproduction: byte-for-byte except the artifacts that measure the"
+        echo "machine rather than the code, as documented:"
+        for f in ${changed}; do echo "    ${f}   (machine-dependent: wall clock, or BLAS residues)"; done
     else
-        echo "reproduction: UNEXPECTED drift -- these differ from the committed copies"
-        echo "and do not plot wall-clock, so the repo is shipping artifacts its own"
-        echo "code no longer produces. Inspect, then commit the regenerated files:"
+        echo "reproduction: UNEXPECTED drift -- these differ from the committed"
+        echo "copies and are none of the excused machine-dependent ones, so the"
+        echo "repo is shipping artifacts its own code no longer produces."
+        echo "Inspect, then commit the regenerated files:"
         for f in ${unexpected}; do echo "    ${f}"; done
-        echo "(the wall-clock plots may also differ; that is expected: ${TIMING_FIGURES})"
+        echo "(these may also differ; that is expected: ${TIMING_FIGURES} ${MACHINE_LOGS})"
     fi
     echo "=================================================================="
 fi
