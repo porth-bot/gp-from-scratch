@@ -39,13 +39,14 @@ An honest wrinkle worth stating up front, because measuring it is the point of
 the density sweep at the end. The evidence prefers Gibbs at every sample size
 tried (+5 to +11 nats), which is the model-selection question and it is not
 close. But the *predictive* advantage nearly vanishes when the data is dense:
-with 140 points the two models' held-out errors are identical to three decimals.
-The reason is that a stationary RBF is not helpless -- it copes by choosing the
-short lengthscale that the rough region demands (l = 0.19, versus the 1.65 the
-smooth region wants) and then leaning on sheer data density to interpolate the
-smooth half anyway. That crutch is only available while the data is dense. Thin
-it out and the stationary model has to fall back on its (wrong, far too short)
-correlation range, and the gap opens: at n = 40 the Gibbs kernel cuts
+with 140 points the two models' smooth-region RMSEs are 0.003 apart (0.110 and
+0.112), against 0.023 at n = 40. The reason is that a stationary RBF is not
+helpless -- it copes by choosing the short lengthscale that the rough region
+demands (at n = 140, l = 0.19, versus the 1.65 the smooth region wants) and
+then leaning on sheer data density to interpolate the smooth half anyway. That
+crutch is only available while the data is dense. Thin it out and the
+stationary model has to fall back on its (wrong, far too short) correlation
+range, and the gap opens: at n = 40 the Gibbs kernel cuts
 smooth-region RMSE by ~18%. So the correct claim is not "nonstationary kernels
 predict better", it is "a stationary kernel pays for its wrong lengthscale in
 the currency of data, and you notice when data is what you are short of".
@@ -57,7 +58,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from common import plt, savefig
+from common import plt, save_results, savefig
 from gp.gp import GPRegressor
 from gp.kernels import RBF, Gibbs
 from gp.optimize import adam_maximize
@@ -232,6 +233,20 @@ def main():
         x=0.01, ha="left", fontsize=11,
     )
     savefig(fig, "gibbs_kernel.png")
+
+    save_results("gibbs_kernel", {
+        "seed": SEED,
+        "n": X.shape[0],
+        "gibbs": {
+            "a": a,
+            "b": b,
+            "l_at_lo": l_lo,
+            "l_at_hi": l_hi,
+            "lml": gibbs.log_marginal_likelihood(),
+        },
+        "rbf": {"l": l_rbf, "lml": rbf.log_marginal_likelihood()},
+        "density_sweep": sweep,
+    })
 
 
 if __name__ == "__main__":

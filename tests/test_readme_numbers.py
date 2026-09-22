@@ -13,13 +13,13 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers seven of the sixteen sections so far**, and `NOT_YET` below names the
-other nine explicitly rather than leaving the hole to be discovered:
+**It covers eight of the sixteen sections so far**, and `NOT_YET` below names the
+other eight explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
 experiments learn to write logs, cheapest script first: §§1 and 9 arrived
-together, then §§4 to 7, all of whose scripts finish in seconds, then §3.
+together, then §§4 to 7, all of whose scripts finish in seconds, then §§3 and 8.
 
 **Three drifted cells so far, and all three are the same mistake.** Every one
 is a number rounded once by the script and then rounded again by hand, in the
@@ -37,6 +37,12 @@ direction that flattered the section:
 The fix in each case is to quote the precision the script prints, not to nudge
 the last digit, because a table written to one digit fewer than the run reports
 invites the same error again. §§1, 3, 6 and 7 came back clean.
+
+§8 was a different kind of miss. Its cells were all right, and the sentence
+under its table was not: "at n=140 the two are indistinguishable to three
+decimals", beside a row reading 0.110 / 0.112 and -0.868 / -0.848. No n in the
+sweep satisfies it. The sentence now quotes the smooth-region RMSE gaps, which
+`test_section_8_the_gap_is_paid_in_data` checks.
 
 Where a column is not the kind of thing a stored number can pin, this file says
 so instead of asserting it: §4's residues move with the BLAS and its
@@ -71,13 +77,14 @@ INSTRUMENTED = {
     "heteroscedastic": "5.",
     "ard": "6.",
     "spatial2d": "7.",
+    "gibbs_kernel": "8.",
     "multistart": "9.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
-    "2.", "8.",
+    "2.",
     "10.", "11.", "12.", "13.", "14.", "15.", "16.",
 ]
 
@@ -443,6 +450,88 @@ def test_section_7_the_uncertainty_swells_but_stays_under_the_prior():
     # The field's amplitude is ~1 and the RMSE is a few percent of it, which is
     # the "interpolates" half of the section's claim.
     assert d["held_out_rmse"] < 0.05
+
+
+# -- Sec. 8: the Gibbs kernel (experiments/gibbs_kernel.py) -----------------
+
+def test_section_8_learned_lengthscales_and_evidence():
+    d = log("gibbs_kernel")
+    body = section("8.")
+    assert int(quoted(body, r"ML-II recovers exactly that \(\$n=(\d+)\$\)")) == d["n"]
+    _, l_cell, lml_cell = cells(body, "RBF (stationary)")
+    assert_rounds_to(d["rbf"]["l"], quoted(l_cell, r"\\ell = ([\d.]+)"),
+                     "§8 RBF lengthscale")
+    assert_rounds_to(d["rbf"]["lml"], lml_cell, "§8 RBF log evidence")
+
+    _, range_cell, lml_cell = cells(body, "**Gibbs** |")
+    g = d["gibbs"]
+    lo, hi = re.findall(r"=([\d.]+)", range_cell)
+    assert_rounds_to(g["l_at_lo"], lo, "§8 Gibbs l(0)")
+    assert_rounds_to(g["l_at_hi"], hi, "§8 Gibbs l(2.2)")
+    assert_rounds_to(g["l_at_lo"] / g["l_at_hi"],
+                     quoted(range_cell, r"\(([\d.]+)× range\)"), "§8 lengthscale range")
+    # l(x) = exp(a + b x), so the endpoints have to come from the logged tilt.
+    assert abs(math.exp(g["a"]) - g["l_at_lo"]) < 1e-12
+    assert abs(math.exp(g["a"] + 2.2 * g["b"]) - g["l_at_hi"]) < 1e-12
+    assert g["b"] < 0, "the chirp gets rougher to the right, so l(x) must fall"
+
+    gibbs_lml, gap = re.findall(r"([+\d.]+)", lml_cell)[:2]
+    assert_rounds_to(g["lml"], gibbs_lml, "§8 Gibbs log evidence")
+    assert_rounds_to(g["lml"] - d["rbf"]["lml"], gap, "§8 evidence gap")
+
+    # The prose's "(0.18, versus the 1.55 the smooth region wants)".
+    rbf_l, smooth_l = re.findall(
+        r"\(\$([\d.]+)\$, versus the \$([\d.]+)\$ the smooth", body)[0]
+    assert_rounds_to(d["rbf"]["l"], rbf_l, "§8 RBF lengthscale in the prose")
+    assert_rounds_to(g["l_at_lo"], smooth_l, "§8 smooth-region lengthscale in the prose")
+
+
+def test_section_8_density_sweep_table():
+    sweep = log("gibbs_kernel")["density_sweep"]
+    body = section("8.")
+    assert [r["n"] for r in sweep] == [40, 60, 90, 140]
+    for r in sweep:
+        _, gap, rmse, nll = cells(body, f"{r['n']} |")
+        assert_rounds_to(r["lml_gibbs"] - r["lml_rbf"], gap.split()[0],
+                         f"§8 n={r['n']} evidence gap")
+        g_rmse, b_rmse = (c.strip() for c in rmse.split("/"))
+        assert_rounds_to(r["rmse_smooth_gibbs"], g_rmse, f"§8 n={r['n']} Gibbs RMSE")
+        assert_rounds_to(r["rmse_smooth_rbf"], b_rmse, f"§8 n={r['n']} RBF RMSE")
+        g_nll, b_nll = (c.strip() for c in nll.split("/"))
+        assert_rounds_to(r["nll_gibbs"], g_nll, f"§8 n={r['n']} Gibbs NLL")
+        assert_rounds_to(r["nll_rbf"], b_nll, f"§8 n={r['n']} RBF NLL")
+    # The n=60 row of the sweep is the same fit as the headline table.
+    row60 = next(r for r in sweep if r["n"] == 60)
+    assert row60["lml_gibbs"] == log("gibbs_kernel")["gibbs"]["lml"]
+
+
+def test_section_8_the_gap_is_paid_in_data():
+    """§8's argument, which the table implies and nothing checked.
+
+    The evidence prefers Gibbs at every n, and the smooth-region advantage is
+    largest where the data is thinnest. This file's first run caught the
+    sentence under the table claiming the two models were "indistinguishable to
+    three decimals" at n=140, where its own table reads 0.110 / 0.112 and
+    -0.868 / -0.848. It never was true at any n in the sweep, so the sentence
+    now quotes the RMSE gaps, and those are checked here.
+    """
+    sweep = log("gibbs_kernel")["density_sweep"]
+    body = section("8.")
+    assert all(r["lml_gibbs"] > r["lml_rbf"] for r in sweep)
+    adv = {r["n"]: r["rmse_smooth_rbf"] - r["rmse_smooth_gibbs"] for r in sweep}
+    assert max(adv, key=adv.get) == min(adv), (
+        f"§8 says the predictive gap opens as data thins; it is largest at "
+        f"n={max(adv, key=adv.get)}"
+    )
+    g90, g140, g40 = re.findall(
+        r"At \$n=90\$ and \$n=140\$\s+the two smooth-region RMSEs are ([\d.]+) "
+        r"and ([\d.]+) apart; at \$n=40\$ they are ([\d.]+)", body)[0]
+    for n, printed in ((90, g90), (140, g140), (40, g40)):
+        assert_rounds_to(adv[n], printed, f"§8 smooth-region RMSE gap at n={n}")
+    row40 = next(r for r in sweep if r["n"] == 40)
+    cut = 1 - row40["rmse_smooth_gibbs"] / row40["rmse_smooth_rbf"]
+    assert_rounds_to(100 * cut, quoted(body, r"cuts\s+smooth-region RMSE by ~(\d+)%"),
+                     "§8 RMSE cut at n=40")
 
 
 # -- Sec. 9: ML-II is non-convex (experiments/multistart.py) -----------------

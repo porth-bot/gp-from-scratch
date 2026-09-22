@@ -419,9 +419,9 @@ only exists while the data is dense:
 
 So the claim is *not* "nonstationary kernels predict better". It is that a
 stationary kernel pays for its wrong lengthscale **in the currency of data**,
-and you only notice when data is what you are short of. At $n=140$ the two are
-indistinguishable to three decimals; at $n=40$ the Gibbs kernel cuts
-smooth-region RMSE by ~18%.
+and you only notice when data is what you are short of. At $n=90$ and $n=140$
+the two smooth-region RMSEs are 0.001 and 0.003 apart; at $n=40$ they are 0.023
+apart, and the Gibbs kernel cuts smooth-region RMSE by ~18%.
 
 Scope, honestly: $\ell(x)=e^{a+bx}$ is *monotone*, which is the right shape for
 a chirp and the wrong one for (say) a single localized bump. A richer $\ell(\cdot)$
@@ -1202,7 +1202,7 @@ machine — §14 measured how little wall clock reproduces, so read them as orde
 of magnitude):
 
 ```bash
-pytest                          # 395 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 398 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
