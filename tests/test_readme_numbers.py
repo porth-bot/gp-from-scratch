@@ -13,13 +13,13 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers six of the sixteen sections so far**, and `NOT_YET` below names the
-other ten explicitly rather than leaving the hole to be discovered:
+**It covers seven of the sixteen sections so far**, and `NOT_YET` below names the
+other nine explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
 experiments learn to write logs, cheapest script first: §§1 and 9 arrived
-together, then §§4 to 7, all of whose scripts finish in seconds.
+together, then §§4 to 7, all of whose scripts finish in seconds, then §3.
 
 **Three drifted cells so far, and all three are the same mistake.** Every one
 is a number rounded once by the script and then rounded again by hand, in the
@@ -36,7 +36,7 @@ direction that flattered the section:
 
 The fix in each case is to quote the precision the script prints, not to nudge
 the last digit, because a table written to one digit fewer than the run reports
-invites the same error again. §§1, 6 and 7 came back clean.
+invites the same error again. §§1, 3, 6 and 7 came back clean.
 
 Where a column is not the kind of thing a stored number can pin, this file says
 so instead of asserting it: §4's residues move with the BLAS and its
@@ -66,6 +66,7 @@ README = (ROOT / "README.md").read_text()
 # the "### N." the section heading opens with.
 INSTRUMENTED = {
     "validate": "1.",
+    "ntk_experiments": "3.",
     "sklearn_parity": "4.",
     "heteroscedastic": "5.",
     "ard": "6.",
@@ -76,7 +77,7 @@ INSTRUMENTED = {
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
-    "2.", "3.", "8.",
+    "2.", "8.",
     "10.", "11.", "12.", "13.", "14.", "15.", "16.",
 ]
 
@@ -105,8 +106,10 @@ def cells(text: str, row_starts_with: str) -> list[str]:
     assert len(rows) == 1, (
         f"{row_starts_with!r} begins {len(rows)} table rows, expected 1"
     )
+    # Split on unescaped pipes only: a label like `\|excess kurtosis\|` is
+    # one cell, not three.
     out = [c.strip().replace("**", "").replace("−", "-")
-           for c in rows[0].strip().strip("|").split("|")]
+           for c in re.split(r"(?<!\\)\|", rows[0].strip().strip("|"))]
     return out
 
 
@@ -205,6 +208,72 @@ def test_section_1_hyperparameter_recovery_table():
         )
         assert_rounds_to(rec["median"][key], median,
                          f"Sec. 1 median ML-II estimate of {key}")
+
+
+# -- Sec. 3: wide networks are GPs (experiments/ntk_experiments.py) --------
+
+def width_headers(text: str) -> list[list[int]]:
+    """The `| width $m$ | ...` header of each table in a section, in order."""
+    return [
+        [int(c) for c in re.split(r"\s*\|\s*", ln.strip().strip("|"))[1:]]
+        for ln in text.splitlines() if ln.startswith("| width $m$ |")
+    ]
+
+
+def test_section_3_gaussianity_table():
+    d = log("ntk_experiments")["nngp_convergence"]
+    body = section("3.")
+    assert width_headers(body)[0] == d["widths"]
+    kurt = cells(body, r"\|excess kurtosis\|")[1:]
+    var = cells(body, r"\|var − NNGP\|/NNGP")[1:]
+    assert len(kurt) == len(var) == len(d["widths"])
+    for m, k_cell, k in zip(d["widths"], kurt, d["abs_excess_kurtosis"]):
+        assert_rounds_to(k, k_cell, f"§3 |excess kurtosis| at m={m}")
+    for m, v_cell, v in zip(d["widths"], var, d["rel_var_error"]):
+        assert_rounds_to(v, v_cell, f"§3 relative variance error at m={m}")
+
+
+def test_section_3_variance_is_exact_and_gaussianity_arrives_at_rate_one_over_m():
+    """The two claims the table is there to support, stated as numbers.
+
+    "its *variance* matches at any width (to <=0.3% here)": the worst relative
+    error across the four widths, against the bound the prose types. "but
+    *Gaussianity* only arrives at rate 1/m": for a sum of m i.i.d. per-neuron
+    terms the excess kurtosis is exactly kappa/m, so the log-log slope over
+    widths 4..256 has to be -1 up to Monte Carlo noise. Measured: -1.006.
+    """
+    d = log("ntk_experiments")["nngp_convergence"]
+    body = section("3.")
+    bound = float(quoted(body, r"to \$\\le([\d.]+)\\%\$\s+here")) / 100
+    assert max(d["rel_var_error"]) <= bound, (
+        f"§3 says the variance matches to <={bound:.1%}; the worst width is "
+        f"off by {max(d['rel_var_error']):.2%}"
+    )
+    slope = np.polyfit(np.log(d["widths"]), np.log(d["abs_excess_kurtosis"]), 1)[0]
+    assert abs(slope + 1.0) < 0.1, (
+        f"§3 says Gaussianity arrives at rate 1/m; the kurtosis decays with "
+        f"log-log slope {slope:.3f}"
+    )
+
+
+def test_section_3_linearization_table_and_its_trend():
+    d = log("ntk_experiments")["linearization"]
+    body = section("3.")
+    assert width_headers(body)[1] == d["widths"]
+    gap = cells(body, r"max \|net − linearized\|")[1:]
+    assert len(gap) == len(d["widths"])
+    for m, cell, per_seed, mean in zip(d["widths"], gap, d["per_seed_max_gap"],
+                                       d["mean_max_gap"]):
+        # The cell is a mean over seeds, so check it is the mean of the seeds
+        # the log holds and not a best or last seed.
+        assert len(per_seed) == 5
+        assert abs(float(np.mean(per_seed)) - mean) < 1e-12
+        assert_rounds_to(mean, cell, f"§3 max|net - linearized| at m={m}")
+    # "The max gap ... shrinks with width": at every step, not just end to end.
+    means = d["mean_max_gap"]
+    assert all(a > b for a, b in zip(means, means[1:])), (
+        f"§3 says the gap shrinks with width; the means are {means}"
+    )
 
 
 # -- Sec. 4: parity vs scikit-learn (experiments/sklearn_parity.py) ----------

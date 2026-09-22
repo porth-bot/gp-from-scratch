@@ -22,7 +22,7 @@ Run:  python experiments/ntk_experiments.py   (~1-2 min)
 
 import numpy as np
 
-from common import plt, savefig
+from common import plt, save_results, savefig
 from gp.nn import TwoLayerReLU, _augment
 from gp.ntk import gd_prediction, nngp_kernel, ntk_kernel
 
@@ -79,6 +79,8 @@ def nngp_convergence():
     ax.set_title("What converges is Gaussianity, not covariance", loc="left")
     ax.legend(fontsize=7)
     savefig(fig, "nngp_convergence.png")
+    return {"x": x, "n_nets": n_nets, "widths": widths,
+            "abs_excess_kurtosis": kurts, "rel_var_error": var_errs}
 
 
 def linearization_error():
@@ -116,6 +118,8 @@ def linearization_error():
     ax.set_title("Training stays on the tangent plane", loc="left")
     ax.legend(fontsize=8)
     savefig(fig, "ntk_linearization.png")
+    return {"lr": lr, "steps": steps, "widths": widths, "per_seed_max_gap": errs,
+            "mean_max_gap": means}
 
 
 def overlay():
@@ -149,6 +153,11 @@ def overlay():
 
 
 if __name__ == "__main__":
-    nngp_convergence()
-    linearization_error()
+    nngp = nngp_convergence()
+    lin = linearization_error()
     overlay()
+    save_results("ntk_experiments", {
+        "seed": SEED,
+        "nngp_convergence": nngp,
+        "linearization": lin,
+    })
