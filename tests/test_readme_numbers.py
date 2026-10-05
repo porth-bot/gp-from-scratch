@@ -13,8 +13,8 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers eight of the sixteen sections so far**, and `NOT_YET` below names the
-other eight explicitly rather than leaving the hole to be discovered:
+**It covers nine of the sixteen sections so far**, and `NOT_YET` below names the
+other seven explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
@@ -79,13 +79,14 @@ INSTRUMENTED = {
     "spatial2d": "7.",
     "gibbs_kernel": "8.",
     "multistart": "9.",
+    "rff": "10.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
     "2.",
-    "10.", "11.", "12.", "13.", "14.", "15.", "16.",
+    "11.", "12.", "13.", "14.", "15.", "16.",
 ]
 
 
@@ -626,6 +627,170 @@ def test_section_9_profile_is_one_sharp_peak_then_a_flat_plateau():
         "the profile's peak-to-plateau height no longer agrees with the "
         "table's multi-start gain, so one of the two is measuring something else"
     )
+
+
+# -- Sec. 10: random Fourier features (experiments/rff.py) -------------------
+
+def test_section_10_kernel_error_table():
+    """The first column of the rate table: kernel approximation error."""
+    d = log("rff")
+    body = section("10.")
+    for D in ("16", "64", "256", "1024", "4096"):
+        row = cells(body, f"{D} |")
+        assert_rounds_to(d["kernel_error"][D]["median"], row[1],
+                         f"§10 kernel error at D={D}")
+
+
+def test_section_10_posterior_error_table():
+    """The posterior columns: mean error (median), worst draw, and sd error."""
+    d = log("rff")
+    body = section("10.")
+    for D in ("16", "64", "256", "1024", "4096"):
+        row = cells(body, f"{D} |")
+        pe = d["posterior_error"][D]
+        # mean error median — strip &nbsp; and italic markup
+        mean_raw = re.sub(r"&nbsp;|\*", "", row[2]).split("(")[0].strip()
+        assert_rounds_to(pe["mean_err_median"], mean_raw,
+                         f"§10 posterior mean error at D={D}")
+        # worst draw (only D=16 shows it)
+        if "worst draw" in row[2]:
+            worst = re.search(r"worst draw ([\d.]+)", row[2]).group(1)
+            assert_rounds_to(pe["mean_err_worst"], worst,
+                             f"§10 posterior mean error worst draw at D={D}")
+        # sd error median
+        assert_rounds_to(pe["sd_err_median"], row[3],
+                         f"§10 posterior sd error at D={D}")
+
+
+def test_section_10_kernel_error_ratio():
+    d = log("rff")
+    body = section("10.")
+    ratio = d["kernel_error_ratio_16_to_4096"]
+    printed = quoted(body, r"256× the features bought \*\*([\d.]+)×")
+    assert_rounds_to(ratio, printed, "§10 kernel error ratio 16->4096")
+
+
+def test_section_10_signal_amplitude():
+    d = log("rff")
+    body = section("10.")
+    printed = quoted(body, r"posterior mean spanning \$\\pm ([\d.]+)\$")
+    assert_rounds_to(d["signal_amplitude"], printed,
+                     "§10 signal amplitude in the rate-table caption")
+
+
+def test_section_10_timing_mean_errors():
+    """The mean-error column of the timing table is deterministic and logged.
+
+    Wall-clock seconds and speedup are machine-dependent and not tested.
+    The README writes the exponent without a leading zero (2.2e-2, not
+    2.2e-02), so the comparison normalises the format.
+    """
+    d = log("rff")
+    body = section("10.")
+    for n in ("500", "1000", "2000", "4000", "8000"):
+        row = cells(body, f"{n} |")
+        cell = row[4].strip()
+        mantissa, _, exp = cell.partition("e")
+        sig = len(mantissa.split(".")[1]) if "." in mantissa else 0
+        formatted = f"{d['timing_mean_error'][n]:.{sig}e}"
+        fmt_m, _, fmt_e = formatted.partition("e")
+        fmt_norm = f"{fmt_m}e{int(fmt_e)}"
+        cell_norm = f"{mantissa}e{int(exp)}"
+        assert fmt_norm == cell_norm, (
+            f"§10 timing mean error at n={n}: README prints {cell}, log holds "
+            f"{d['timing_mean_error'][n]!r}, which formats to {fmt_norm}"
+        )
+
+
+def test_section_10_starvation_table():
+    """The variance-starvation table and its surrounding prose."""
+    d = log("rff")
+    st = d["starvation"]
+    body = section("10.")
+
+    # exact sd
+    printed_sd = quoted(body, r"gap centre is \*\*([\d.]+)\*\*")
+    assert_rounds_to(st["exact_sd"], printed_sd, "§10 exact sd at gap centre")
+    exact_row = cells(body, "exact GP |")
+    assert_rounds_to(st["exact_sd"], exact_row[1], "§10 exact sd in table")
+
+    # D=2048 row — cells contain &nbsp; between the number and the parenthetical
+    d2k = st["D2048"]
+    row_2k = cells(body, "$D = 2048$")
+    sd_2k_raw = row_2k[1].replace("&nbsp;", " ").split("(")[0].strip()
+    assert_rounds_to(d2k["sd_median"], sd_2k_raw, "§10 D=2048 sd median")
+    ratio_2k = re.search(r"\(([\d.]+)×\)", row_2k[1]).group(1)
+    assert_rounds_to(d2k["sd_median"] / st["exact_sd"], ratio_2k,
+                     "§10 D=2048 sd ratio to exact")
+    range_2k = re.findall(r"\[([\d.]+),\s*([\d.]+)\]", row_2k[2])
+    assert len(range_2k) == 1
+    assert_rounds_to(d2k["sd_min"], range_2k[0][0], "§10 D=2048 sd min")
+    assert_rounds_to(d2k["sd_max"], range_2k[0][1], "§10 D=2048 sd max")
+    assert_rounds_to(d2k["mean_err_gap"], row_2k[3], "§10 D=2048 mean err in gap")
+    assert_rounds_to(d2k["mean_err_data"], row_2k[4], "§10 D=2048 mean err on data")
+
+    # D=64 row — same &nbsp; treatment
+    d64 = st["D64"]
+    row_64 = cells(body, "$D = 64$")
+    sd_64_raw = row_64[1].replace("&nbsp;", " ").split("(")[0].strip()
+    assert_rounds_to(d64["sd_median"], sd_64_raw, "§10 D=64 sd median")
+    ratio_64 = re.search(r"\(([\d.]+)×\)", row_64[1]).group(1)
+    assert_rounds_to(d64["sd_median"] / st["exact_sd"], ratio_64,
+                     "§10 D=64 sd ratio to exact")
+    range_64 = re.findall(r"\[([\d.]+),\s*([\d.]+)\]", row_64[2])
+    assert len(range_64) == 1
+    assert_rounds_to(d64["sd_min"], range_64[0][0], "§10 D=64 sd min")
+    assert_rounds_to(d64["sd_max"], range_64[0][1], "§10 D=64 sd max")
+    assert_rounds_to(d64["mean_err_gap"], row_64[3], "§10 D=64 mean err in gap")
+    assert_rounds_to(d64["mean_err_data"], row_64[4], "§10 D=64 mean err on data")
+
+
+def test_section_10_starvation_prose_numbers():
+    """Prose claims in the starvation subsection."""
+    d = log("rff")
+    st = d["starvation"]
+    body = section("10.")
+
+    # "even the best draw is 34% below exact"
+    best_ratio = st["D64"]["sd_max"] / st["exact_sd"]
+    # The text wraps across lines, so match with re.DOTALL-like flexibility.
+    pct_below = quoted(body, r"best draw is (\d+)%\s+below exact")
+    assert round((1 - best_ratio) * 100) == int(pct_below), (
+        f"§10 says best draw is {pct_below}% below exact; measured "
+        f"{(1 - best_ratio) * 100:.0f}%"
+    )
+
+    # "the spread runs 7x"
+    spread = st["D64"]["sd_max"] / st["D64"]["sd_min"]
+    printed_spread = quoted(body, r"the spread runs\s+(\d+)×")
+    assert round(spread) == int(printed_spread), (
+        f"§10 says the D=64 spread is {printed_spread}x; measured {spread:.1f}x"
+    )
+
+    # "off by 0.527 in the gap and 0.009 where the data are, a 56x difference"
+    gap_err = quoted(body, r"off by \*\*([\d.]+)\*\* in\s+the gap")
+    assert_rounds_to(st["D64"]["mean_err_gap"], gap_err,
+                     "§10 D=64 gap error in prose")
+    data_err = re.findall(r"([\d.]+) where the data are, a (\d+)×", body)
+    assert len(data_err) == 1, f"data-error prose matched {len(data_err)} times"
+    assert_rounds_to(st["D64"]["mean_err_data"], data_err[0][0],
+                     "§10 D=64 data error in prose")
+    ratio = st["D64"]["mean_err_gap"] / st["D64"]["mean_err_data"]
+    assert round(ratio) == int(data_err[0][1]), (
+        f"§10 says gap/data ratio is {data_err[0][1]}x; measured {ratio:.0f}x"
+    )
+
+    # "Even D=2048 ... is 22x worse in the gap than on the data"
+    ratio_2k = st["D2048"]["mean_err_gap"] / st["D2048"]["mean_err_data"]
+    printed_2k = quoted(body, r"(\d+)× worse in the gap than on the data")
+    assert round(ratio_2k) == int(printed_2k), (
+        f"§10 says D=2048 gap/data ratio is {printed_2k}x; measured {ratio_2k:.0f}x"
+    )
+
+    # "posterior mean spanning +-1.5" in the starvation subsection
+    sig_starv = quoted(body, r"against a posterior\s+mean spanning \$\\pm([\d.]+)\$")
+    assert_rounds_to(d["signal_amplitude"], sig_starv,
+                     "§10 signal amplitude in starvation prose")
 
 
 # -- the instrument's own coverage -------------------------------------------

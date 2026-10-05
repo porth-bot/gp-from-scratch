@@ -29,7 +29,7 @@ import time
 
 import numpy as np
 
-from common import savefig
+from common import savefig, save_results
 import matplotlib.pyplot as plt
 
 from gp.gp import GPRegressor
@@ -276,6 +276,50 @@ def main():
     ax.legend(fontsize=7.5, loc="upper center", ncol=3)
 
     savefig(fig, "rff.png")
+
+    # ---- log the numbers the README quotes ----------------------------------
+    # Wall-clock seconds and speedup are machine-dependent and not logged.
+    # The mean error column of the timing table IS deterministic (same seeds).
+    Ds_table = [16, 64, 256, 1024, 4096]
+    idx = [list(Ds).index(D) for D in Ds_table]
+    payload = {
+        "kernel_error": {
+            str(D): {"median": float(kerr[i, 0])}
+            for D, i in zip(Ds_table, idx)
+        },
+        "kernel_error_ratio_16_to_4096": float(kerr[0, 0] / kerr[-1, 0]),
+        "posterior_error": {
+            str(D): {
+                "mean_err_median": float(perr[i, 0]),
+                "mean_err_worst": float(perr[i, 2]),
+                "sd_err_median": float(perr[i, 3]),
+            }
+            for D, i in zip(Ds_table, idx)
+        },
+        "signal_amplitude": float(signal),
+        "timing_mean_error": {
+            str(n): float(tim[j, 2])
+            for j, n in enumerate(ns)
+        },
+        "starvation": {
+            "exact_sd": float(sd_exact),
+            "D64": {
+                "sd_median": float(star[(64, "sd_spread")][0]),
+                "sd_min": float(star[(64, "sd_spread")][1]),
+                "sd_max": float(star[(64, "sd_spread")][2]),
+                "mean_err_gap": float(np.abs(star[64][0] - mean_exact)[in_gap].max()),
+                "mean_err_data": float(np.abs(star[64][0] - mean_exact)[~in_gap].max()),
+            },
+            "D2048": {
+                "sd_median": float(star[(2048, "sd_spread")][0]),
+                "sd_min": float(star[(2048, "sd_spread")][1]),
+                "sd_max": float(star[(2048, "sd_spread")][2]),
+                "mean_err_gap": float(np.abs(star[2048][0] - mean_exact)[in_gap].max()),
+                "mean_err_data": float(np.abs(star[2048][0] - mean_exact)[~in_gap].max()),
+            },
+        },
+    }
+    save_results("rff", payload)
     return kerr, perr, tim
 
 
