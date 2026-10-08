@@ -13,8 +13,8 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers ten of the sixteen sections so far**, and `NOT_YET` below names the
-other seven explicitly rather than leaving the hole to be discovered:
+**It covers eleven of the sixteen sections so far**, and `NOT_YET` below names the
+other five explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
@@ -81,13 +81,14 @@ INSTRUMENTED = {
     "multistart": "9.",
     "rff": "10.",
     "sparse": "11.",
+    "fitc": "12.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
     "2.",
-    "12.", "13.", "14.", "15.", "16.",
+    "13.", "14.", "15.", "16.",
 ]
 
 
@@ -991,6 +992,223 @@ def test_section_11_force_split():
     norm_agree = printed_agree.replace("−", "-")
     assert_formats_to(fs["agreement"], norm_agree,
                       "§11 force split agreement")
+
+
+# -- Sec. 12: FITC (experiments/fitc.py) --------------------------------------
+
+def _mean(lst):
+    return sum(lst) / len(lst)
+
+
+def _std(lst):
+    m = _mean(lst)
+    return (sum((x - m) ** 2 for x in lst) / len(lst)) ** 0.5
+
+
+def _col(data_2d, j):
+    """Column j of a seeds×M list-of-lists."""
+    return [row[j] for row in data_2d]
+
+
+def test_section_12_exact_gp_reference():
+    """The exact GP's ML-II noise, coverage and NLPD on the clumped design."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    exact_noise_mean = _mean(cl["exact_noise"])
+    exact_noise_std = _std(cl["exact_noise"])
+    m = re.search(
+        r"exact GP.s own ML-II lands\s+at \$([\d.]+)\s*\\pm\s*([\d.]+)\$\s+"
+        r"with coverage ([\d.]+) and NLPD ([\d.]+)",
+        body,
+    )
+    assert m, "§12 exact GP reference line not found"
+    assert_rounds_to(exact_noise_mean, m.group(1), "§12 exact noise mean")
+    assert_rounds_to(exact_noise_std, m.group(2), "§12 exact noise std")
+    assert_rounds_to(_mean(cl["exact_cov"]), m.group(3), "§12 exact coverage")
+    assert_rounds_to(_mean(cl["exact_nlpd"]), m.group(4), "§12 exact NLPD")
+
+
+def test_section_12_clumped_table():
+    """All cells of the main clumped-design table."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    M_list = cl["M"]
+    for j, M in enumerate(M_list):
+        for method in ("vfe", "fitc"):
+            label = method.upper()
+            row = cells(body, f"{M} | {label}")
+            noise_mean = _mean(_col(cl[method]["noise"], j))
+            noise_std = _std(_col(cl[method]["noise"], j))
+            trace_mean = _mean(_col(cl[method]["trace"], j))
+            sd_mean = _mean(_col(cl[method]["sd"], j))
+            cov_mean = _mean(_col(cl[method]["cov"], j))
+            nlpd_mean = _mean(_col(cl[method]["nlpd"], j))
+
+            noise_parts = row[2].split("±")
+            assert_rounds_to(noise_mean, noise_parts[0].strip(),
+                             f"§12 {label} M={M} noise mean")
+            assert_rounds_to(noise_std, noise_parts[1].strip(),
+                             f"§12 {label} M={M} noise std")
+            assert_rounds_to(trace_mean, row[3],
+                             f"§12 {label} M={M} trace")
+            assert_rounds_to(sd_mean, row[4],
+                             f"§12 {label} M={M} sd/exact")
+            assert_rounds_to(cov_mean, row[5],
+                             f"§12 {label} M={M} coverage")
+            assert_rounds_to(nlpd_mean, row[6],
+                             f"§12 {label} M={M} NLPD")
+
+
+def test_section_12_vfe_recovers_exact():
+    """VFE at M=20 recovers the exact GP's ML-II noise to four decimals."""
+    d = log("fitc")
+    cl = d["clumped"]
+    M_list = cl["M"]
+    j20 = M_list.index(20)
+    vfe_noise_20 = _mean(_col(cl["vfe"]["noise"], j20))
+    exact_noise = _mean(cl["exact_noise"])
+    assert round(vfe_noise_20, 4) == round(exact_noise, 4), (
+        f"§12 VFE M=20 noise {vfe_noise_20:.4f} != exact {exact_noise:.4f}"
+    )
+
+
+def test_section_12_fitc_shortfall_rises():
+    """'FITC's shortfall *rises* with M — 8.7, 10.4, still 5.5 at M=40'."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    M_list = cl["M"]
+    fitc_traces = [_mean(_col(cl["fitc"]["trace"], j)) for j in range(len(M_list))]
+    nums = re.findall(r"shortfall \*rises\*.*?([\d.]+),\s*([\d.]+).*?still ([\d.]+)", body, re.S)
+    assert len(nums) == 1, "§12 shortfall rise sentence not found"
+    j6, j20, j40 = M_list.index(6), M_list.index(20), M_list.index(40)
+    assert_rounds_to(fitc_traces[j6], nums[0][0], "§12 FITC trace M=6")
+    assert_rounds_to(fitc_traces[j20], nums[0][1], "§12 FITC trace M=20")
+    assert_rounds_to(fitc_traces[j40], nums[0][2], "§12 FITC trace M=40")
+
+
+def test_section_12_fitc_calibration_at_m20():
+    """'at M=20, held-out coverage 0.880 ... NLPD 0.611 ... exact GP's 0.266'."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    j20 = cl["M"].index(20)
+    m = re.search(
+        r"at \$M = 20\$, held-out coverage ([\d.]+).*?NLPD ([\d.]+) against "
+        r"the exact GP.s ([\d.]+)\b",
+        body, re.S,
+    )
+    assert m, "§12 M=20 calibration sentence not found"
+    assert_rounds_to(_mean(_col(cl["fitc"]["cov"], j20)), m.group(1),
+                     "§12 FITC M=20 coverage")
+    assert_rounds_to(_mean(_col(cl["fitc"]["nlpd"], j20)), m.group(2),
+                     "§12 FITC M=20 NLPD")
+    assert_rounds_to(_mean(cl["exact_nlpd"]), m.group(3),
+                     "§12 exact GP NLPD in calibration prose")
+
+
+def test_section_12_bias_range():
+    """'The cell means are a 1.6–3.2× underestimate'."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    true_noise = d["true_noise"]
+    fitc_means = [_mean(_col(cl["fitc"]["noise"], j)) for j in range(len(cl["M"]))]
+    ratios = [true_noise / n for n in fitc_means]
+    m = re.search(r"([\d.]+)[–-]([\d.]+)× underestimate", body)
+    assert m, "§12 bias range not found"
+    assert_rounds_to(min(ratios), m.group(1), "§12 min bias ratio")
+    assert_rounds_to(max(ratios), m.group(2), "§12 max bias ratio")
+
+
+def test_section_12_tail_collapse():
+    """'2 of 20 clumped fits land below a fifth of the truth (worst 0.00129,
+    1.4% of σ²), and 0 of 20 on the uniform control'."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    true_noise = d["true_noise"]
+    all_fitc = [v for row in cl["fitc"]["noise"] for v in row]
+    collapsed = sum(1 for v in all_fitc if v < 0.2 * true_noise)
+    worst = min(all_fitc)
+    m = re.search(
+        r"(\d+)\s+of\s+(\d+)\s+clumped\s+fits\s+land\s+below.*?"
+        r"worst\s+\*\*([\d.]+)\*\*.*?"
+        r"([\d.]+)%\s+of.*?(\d+)\s+of\s+(\d+)\s+on\s+the\s+uniform",
+        body, re.S,
+    )
+    assert m, "§12 tail collapse sentence not found"
+    assert collapsed == int(m.group(1)), (
+        f"§12 says {m.group(1)} collapsed; measured {collapsed}"
+    )
+    assert len(all_fitc) == int(m.group(2)), (
+        f"§12 says {m.group(2)} total; have {len(all_fitc)}"
+    )
+    assert_rounds_to(worst, m.group(3), "§12 worst FITC noise")
+    assert_rounds_to(100 * worst / true_noise, m.group(4),
+                     "§12 worst as % of truth")
+    unif = d["uniform"]
+    all_fitc_u = [v for row in unif["fitc"]["noise"] for v in row]
+    collapsed_u = sum(1 for v in all_fitc_u if v < 0.2 * true_noise)
+    assert collapsed_u == int(m.group(5)), (
+        f"§12 says {m.group(5)} uniform collapsed; measured {collapsed_u}"
+    )
+
+
+def test_section_12_sd_flip():
+    """'0.956× exact on held-out data and 1.215× exact on a uniform grid'."""
+    d = log("fitc")
+    body = section("12.")
+    cl = d["clumped"]
+    j20 = cl["M"].index(20)
+    m = re.search(
+        r"([\d.]+)× exact on held-out \*data\*.*?([\d.]+)× exact on a uniform grid",
+        body, re.S,
+    )
+    assert m, "§12 sd flip sentence not found"
+    assert_rounds_to(_mean(_col(cl["fitc"]["sd"], j20)), m.group(1),
+                     "§12 FITC M=20 sd on data")
+    assert_rounds_to(_mean(_col(cl["fitc"]["grid_sd"], j20)), m.group(2),
+                     "§12 FITC M=20 sd on grid")
+
+
+def test_section_12_vfe_uniform_bias():
+    """VFE on uniform at M=6: σ²=0.174, 1.9× truth, sd 1.37× exact."""
+    d = log("fitc")
+    body = section("12.")
+    unif = d["uniform"]
+    j6 = unif["M"].index(6)
+    m = re.search(
+        r"uniform\s+design\s+at\s+\$M\s*=\s*6\$\s+it\s+fits\s+"
+        r"\$\\sigma\^2\s*=\s*([\d.]+)\$.*?"
+        r"([\d.]+)×\s+the\s+truth.*?sd\s+([\d.]+)×\s+exact",
+        body, re.S,
+    )
+    assert m, "§12 VFE uniform bias sentence not found"
+    assert_rounds_to(_mean(_col(unif["vfe"]["noise"], j6)), m.group(1),
+                     "§12 VFE uniform M=6 noise")
+    vfe_ratio = _mean(_col(unif["vfe"]["noise"], j6)) / d["true_noise"]
+    assert_rounds_to(vfe_ratio, m.group(2),
+                     "§12 VFE uniform M=6 noise ratio")
+    assert_rounds_to(_mean(_col(unif["vfe"]["sd"], j6)), m.group(3),
+                     "§12 VFE uniform M=6 sd ratio")
+
+
+def test_section_12_trace_trend():
+    """'the trace penalty is what buys it back as M grows (0.750 → 0.004)'."""
+    d = log("fitc")
+    body = section("12.")
+    unif = d["uniform"]
+    m = re.search(r"trace penalty.*?\(([\d.]+)\s*→\s*([\d.]+)\)", body, re.S)
+    assert m, "§12 trace trend not found"
+    j6 = unif["M"].index(6)
+    j20 = unif["M"].index(20)
+    assert_rounds_to(_mean(_col(unif["vfe"]["trace"], j6)), m.group(1),
+                     "§12 VFE uniform trace at M=6")
+    assert_rounds_to(_mean(_col(unif["vfe"]["trace"], j20)), m.group(2),
+                     "§12 VFE uniform trace at M=20")
 
 
 # -- the instrument's own coverage -------------------------------------------

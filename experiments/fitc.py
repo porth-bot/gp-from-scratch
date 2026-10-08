@@ -77,7 +77,7 @@ import time
 
 import numpy as np
 
-from common import savefig
+from common import savefig, save_results
 import matplotlib.pyplot as plt
 
 from gp.gp import GPRegressor
@@ -328,6 +328,26 @@ def main():
     report(clump, "clumped design (six clusters of 25)")
     report(unif, "uniform design (n = 150), the control")
     figure(clump, unif)
+
+    # ---- log: the numbers the README quotes --------------------------------
+    def _pack(res):
+        d = {}
+        d["exact_noise"] = res["exact_noise"].tolist()
+        d["exact_cov"] = res["exact_cov"].tolist()
+        d["exact_nlpd"] = res["exact_nlpd"].tolist()
+        d["M"] = list(M_GRID)
+        for method in METHODS:
+            d[method] = {}
+            for key in ("noise", "trace", "sd", "cov", "nlpd", "grid_sd"):
+                d[method][key] = res[f"{method}_{key}"].tolist()
+        return d
+
+    save_results("fitc", {
+        "clumped": _pack(clump),
+        "uniform": _pack(unif),
+        "true_noise": TRUE_NOISE,
+    })
+
     print(f"\ntotal {time.time() - t0:.0f}s")
     return clump, unif
 
