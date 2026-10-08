@@ -55,7 +55,7 @@ import time
 
 import numpy as np
 
-from common import savefig
+from common import savefig, save_results
 import matplotlib.pyplot as plt
 
 from gp.gp import GPRegressor
@@ -288,6 +288,7 @@ def main():
     print("\n   is the force on Z even looking at y? the two terms of dF/dZ, "
           "split by\n   finite differences. The trace penalty is a sum of "
           "conditional variances and\n   never sees y; only the DTC term does.")
+    force_init = None
     for tag, optimize_Z in (("at the quantile init (theta fitted, Z not yet moved)",
                              False),
                             ("at the converged joint optimum", True)):
@@ -295,6 +296,8 @@ def main():
         maximize_elbo(probe, X, y, optimize_Z=optimize_Z, lr=LR, steps=STEPS)
         total, g_dtc, g_pen = force_split(probe, X, y)
         n_pen, n_dtc = np.linalg.norm(g_pen), np.linalg.norm(g_dtc)
+        if not optimize_Z:
+            force_init = (n_pen, n_dtc, float(np.abs(g_dtc + g_pen - total).max()))
         print(f"    {tag}")
         print(f"      trace penalty (y-blind) {n_pen:8.2f} | DTC data fit "
               f"(sees y) {n_dtc:8.2f} | net {np.linalg.norm(total):8.2f}"
@@ -436,6 +439,47 @@ def main():
     ax.legend(fontsize=7, loc="upper left", ncol=1)
 
     savefig(fig, "sparse.png")
+
+    # ---- log: the numbers the README quotes --------------------------------
+    # Wall-clock columns (col 6) are machine-dependent and are not logged.
+    log = {
+        "exact": {
+            "lengthscale": float(np.exp(exact.params[1])),
+            "noise_var": float(np.exp(exact.params[-1])),
+            "log_marginal_likelihood": float(lml),
+        },
+        "sweep": {
+            "M": list(MS),
+            "optimized": {
+                "gap": free[:, 0].tolist(),
+                "mean_err": free[:, 1].tolist(),
+                "sd_err": free[:, 2].tolist(),
+                "lengthscale": free[:, 4].tolist(),
+            },
+            "frozen": {
+                "gap": frozen[:, 0].tolist(),
+                "mean_err": frozen[:, 1].tolist(),
+                "sd_err": frozen[:, 2].tolist(),
+                "lengthscale": frozen[:, 4].tolist(),
+            },
+        },
+        "inducing_points": {
+            str(M): Zs[M].tolist() for M in MS if M in Zs
+        },
+        "control": {
+            "exact_lengthscale": float(np.exp(exact_c.params[1])),
+            "inducing_points": {
+                str(M): control_Z[M].tolist() for M in control_Z
+            },
+        },
+        "force_split_init": {
+            "trace_norm": force_init[0],
+            "dtc_norm": force_init[1],
+            "agreement": force_init[2],
+        },
+    }
+    save_results("sparse", log)
+
     return free, frozen, Zs
 
 

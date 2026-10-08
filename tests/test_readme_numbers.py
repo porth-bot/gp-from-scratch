@@ -13,7 +13,7 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers nine of the sixteen sections so far**, and `NOT_YET` below names the
+**It covers ten of the sixteen sections so far**, and `NOT_YET` below names the
 other seven explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
@@ -80,13 +80,14 @@ INSTRUMENTED = {
     "gibbs_kernel": "8.",
     "multistart": "9.",
     "rff": "10.",
+    "sparse": "11.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
     "2.",
-    "11.", "12.", "13.", "14.", "15.", "16.",
+    "12.", "13.", "14.", "15.", "16.",
 ]
 
 
@@ -791,6 +792,205 @@ def test_section_10_starvation_prose_numbers():
     sig_starv = quoted(body, r"against a posterior\s+mean spanning \$\\pm([\d.]+)\$")
     assert_rounds_to(d["signal_amplitude"], sig_starv,
                      "§10 signal amplitude in starvation prose")
+
+
+# -- Sec. 11: sparse GPs (experiments/sparse.py) -----------------------------
+
+def test_section_11_exact_gp_parameters():
+    """The exact GP's fitted hyperparameters and log evidence."""
+    d = log("sparse")
+    body = section("11.")
+    ell = quoted(body, r"ML-II fit \(\$\\ell = ([\d.]+)\$")
+    assert_rounds_to(d["exact"]["lengthscale"], ell, "§11 exact GP lengthscale")
+    sig2 = quoted(body, r"\$\\sigma\^2 = ([\d.]+)\$")
+    assert_rounds_to(d["exact"]["noise_var"], sig2, "§11 exact GP noise variance")
+    lml = quoted(body, r"log evidence \*\*([\d.]+)\*\*")
+    assert_rounds_to(d["exact"]["log_marginal_likelihood"], lml,
+                     "§11 exact GP log marginal likelihood")
+
+
+def test_section_11_sweep_table():
+    """All cells of the M-sweep table: gap, mean err, sd err for both arms."""
+    d = log("sparse")
+    body = section("11.")
+    M_list = d["sweep"]["M"]
+    opt = d["sweep"]["optimized"]
+    frz = d["sweep"]["frozen"]
+    table_Ms = [2, 4, 8, 12, 16, 24, 32, 64]
+    for M in table_Ms:
+        i = M_list.index(M)
+        row = cells(body, f"{M} ")
+        opt_gap_cell = row[1]
+        opt_mean_cell = row[2]
+        opt_sd_cell = row[3]
+        frz_gap_cell = row[4]
+        frz_mean_cell = row[5]
+        frz_sd_cell = row[6]
+        if "e" in opt_gap_cell.lower() or "−" in opt_gap_cell:
+            norm = opt_gap_cell.replace("−", "-")
+            assert_formats_to(opt["gap"][i], norm,
+                              f"§11 opt gap at M={M}")
+        else:
+            assert_rounds_to(opt["gap"][i], opt_gap_cell,
+                             f"§11 opt gap at M={M}")
+        assert_rounds_to(opt["mean_err"][i], opt_mean_cell,
+                         f"§11 opt mean err at M={M}")
+        assert_rounds_to(opt["sd_err"][i], opt_sd_cell,
+                         f"§11 opt sd err at M={M}")
+        if "e" in frz_gap_cell.lower() or "−" in frz_gap_cell:
+            norm = frz_gap_cell.replace("−", "-")
+            assert_formats_to(frz["gap"][i], norm,
+                              f"§11 frozen gap at M={M}")
+        else:
+            assert_rounds_to(frz["gap"][i], frz_gap_cell,
+                             f"§11 frozen gap at M={M}")
+        assert_rounds_to(frz["mean_err"][i], frz_mean_cell,
+                         f"§11 frozen mean err at M={M}")
+        assert_rounds_to(frz["sd_err"][i], frz_sd_cell,
+                         f"§11 frozen sd err at M={M}")
+
+
+def test_section_11_gap_is_monotone_and_nonnegative():
+    """The bound's defining property: gap >= 0, decreasing in M."""
+    d = log("sparse")
+    for arm in ("optimized", "frozen"):
+        gaps = d["sweep"][arm]["gap"]
+        assert all(g >= -1e-6 for g in gaps), (
+            f"§11 {arm} arm has a negative gap: the bound is above the ceiling"
+        )
+        assert all(a >= b for a, b in zip(gaps, gaps[1:])), (
+            f"§11 {arm} arm's gap is not monotone in M"
+        )
+
+
+def test_section_11_matching_M():
+    """'optimized M=8 matches frozen M=12, optimized 32 matches frozen 48'."""
+    d = log("sparse")
+    body = section("11.")
+    M_list = d["sweep"]["M"]
+    opt_gaps = d["sweep"]["optimized"]["gap"]
+    frz_gaps = d["sweep"]["frozen"]["gap"]
+    pairs = re.findall(r"optimized\s+(?:\$M\{=\})?(\d+)\$?\s+matches\s+frozen\s+(?:\$M\{=\})?(\d+)\$?", body)
+    assert len(pairs) >= 2, f"§11 should name at least 2 matching pairs; found {pairs}"
+    for opt_s, frz_s in pairs:
+        opt_M, frz_M = int(opt_s), int(frz_s)
+        opt_gap = opt_gaps[M_list.index(opt_M)]
+        frz_gap = frz_gaps[M_list.index(frz_M)]
+        assert frz_gap <= opt_gap, (
+            f"§11 says optimized M={opt_M} matches frozen M={frz_M}, "
+            f"but frozen gap {frz_gap:.4f} > optimized gap {opt_gap:.4f}"
+        )
+        frz_i = M_list.index(frz_M)
+        for j in range(frz_i):
+            assert frz_gaps[j] > opt_gap, (
+                f"§11 says optimized M={opt_M} matches frozen M={frz_M}, "
+                f"but frozen M={M_list[j]} already has gap {frz_gaps[j]:.4f} "
+                f"<= optimized gap {opt_gap:.4f}"
+            )
+
+
+def test_section_11_spacing_in_lengthscales():
+    """The spacing claim: 'gap collapses at about 0.7 fitted lengthscales'."""
+    d = log("sparse")
+    body = section("11.")
+    M_list = d["sweep"]["M"]
+    Zs = d["inducing_points"]
+    opt_lengths = d["sweep"]["optimized"]["lengthscale"]
+    for M_str, ell_str, gap_str in re.findall(
+        r"\$M\{=\}(\d+)\$:\s+([\d.]+)\s+\$\\ell\$,\s+gap\s+([\d.]+)\s+nats",
+        body
+    ):
+        M = int(M_str)
+        i = M_list.index(M)
+        Z = np.array(Zs[str(M)])
+        l = opt_lengths[i]
+        slow_Z = Z[Z <= 0]
+        slow_spacing = float(np.median(np.diff(slow_Z))) / l
+        assert_rounds_to(slow_spacing, ell_str,
+                         f"§11 slow spacing in ℓ at M={M}")
+        assert_rounds_to(d["sweep"]["optimized"]["gap"][i], gap_str,
+                         f"§11 gap at M={M} in spacing prose")
+
+
+def test_section_11_sd_error_nonmonotonicity():
+    """The specific M values where sd error rises are named in the prose."""
+    d = log("sparse")
+    body = section("11.")
+    opt_sd = d["sweep"]["optimized"]["sd_err"]
+    frz_sd = d["sweep"]["frozen"]["sd_err"]
+    M_list = d["sweep"]["M"]
+    opt_rises = [M_list[i + 1] for i in range(len(opt_sd) - 1) if opt_sd[i + 1] > opt_sd[i]]
+    frz_rises = [M_list[i + 1] for i in range(len(frz_sd) - 1) if frz_sd[i + 1] > frz_sd[i]]
+    m = re.search(r"sd error rises at \$M = (\d+)\$ and again at (\d+)", body)
+    assert m, "§11 should name two M values where opt sd rises"
+    assert int(m.group(1)) in opt_rises, f"§11 says opt sd rises at M={m.group(1)} but data disagrees"
+    assert int(m.group(2)) in opt_rises, f"§11 says opt sd rises at M={m.group(2)} but data disagrees"
+    m2 = re.search(r"frozen arm.s at (\d+) and\s+(\d+)", body)
+    assert m2, "§11 should name two M values where frozen sd rises"
+    assert int(m2.group(1)) in frz_rises, f"§11 says frozen sd rises at M={m2.group(1)} but data disagrees"
+    assert int(m2.group(2)) in frz_rises, f"§11 says frozen sd rises at M={m2.group(2)} but data disagrees"
+
+
+def test_section_11_inducing_point_clustering():
+    """M=64 optimum: 36/64 (56%) in the fast half, 1.15x denser."""
+    d = log("sparse")
+    body = section("11.")
+    Z = np.array(d["inducing_points"]["64"])
+    n_fast = int((Z > 0).sum())
+    printed_n = int(quoted(body, r"puts (\d+) of 64"))
+    assert n_fast == printed_n, (
+        f"§11 says {printed_n} of 64 in fast half; measured {n_fast}"
+    )
+    printed_pct = quoted(body, r"puts \d+ of 64 \((\d+)%\)")
+    assert round(100 * n_fast / 64) == int(printed_pct), (
+        f"§11 says {printed_pct}%; measured {100 * n_fast / 64:.0f}%"
+    )
+    slow_sp = float(np.median(np.diff(Z[Z <= 0])))
+    fast_sp = float(np.median(np.diff(Z[Z > 0])))
+    ratio = slow_sp / fast_sp
+    printed_ratio = quoted(body, r"spacing ([\d.]+)× denser")
+    assert_rounds_to(ratio, printed_ratio,
+                     "§11 spacing ratio at M=64")
+
+
+def test_section_11_control_density():
+    """The 3:1 control: exact GP ℓ, count and spacing at M=64."""
+    d = log("sparse")
+    body = section("11.")
+    ell_ctrl = quoted(body, r"still fits \$\\ell = ([\d.]+)\$")
+    assert_rounds_to(d["control"]["exact_lengthscale"], ell_ctrl,
+                     "§11 control exact GP lengthscale")
+    Z_ctrl = np.array(d["control"]["inducing_points"]["64"])
+    n_fast_ctrl = int((Z_ctrl > 0).sum())
+    printed_ctrl_n = int(quoted(body, r"(\d+) of 64 \(\d+%\) in the fast half,\s+[\d.]+× denser"))
+    assert n_fast_ctrl == printed_ctrl_n, (
+        f"§11 control says {printed_ctrl_n} of 64 fast; measured {n_fast_ctrl}"
+    )
+    printed_ctrl_pct = quoted(body, r"\d+ of 64 \((\d+)%\) in the fast half,\s+[\d.]+× denser")
+    assert round(100 * n_fast_ctrl / 64) == int(printed_ctrl_pct)
+    slow_sp = float(np.median(np.diff(Z_ctrl[Z_ctrl <= 0])))
+    fast_sp = float(np.median(np.diff(Z_ctrl[Z_ctrl > 0])))
+    ratio_ctrl = fast_sp / slow_sp
+    printed_ctrl_ratio = quoted(body, r"([\d.]+)× denser where the \*\*data\*\*")
+    assert_rounds_to(ratio_ctrl, printed_ctrl_ratio,
+                     "§11 control spacing ratio at M=64")
+
+
+def test_section_11_force_split():
+    """The dF/dZ split: trace 92.37, DTC 419.95, agreement 1.1e-06."""
+    d = log("sparse")
+    body = section("11.")
+    fs = d["force_split_init"]
+    printed_trace = quoted(body, r"trace contributes ([\d.]+)")
+    assert_rounds_to(fs["trace_norm"], printed_trace,
+                     "§11 trace penalty norm")
+    printed_dtc = quoted(body, r"DTC term.s ([\d.]+)")
+    assert_rounds_to(fs["dtc_norm"], printed_dtc,
+                     "§11 DTC data-fit norm")
+    printed_agree = quoted(body, r"to ([\d.]+e[−\-]\d+)")
+    norm_agree = printed_agree.replace("−", "-")
+    assert_formats_to(fs["agreement"], norm_agree,
+                      "§11 force split agreement")
 
 
 # -- the instrument's own coverage -------------------------------------------
