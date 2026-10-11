@@ -730,7 +730,7 @@ below is a tuned method beating an untuned one.
 | rank $R$ | RFF, median [min, max] | SGPR, quantile $Z$ | SGPR, blind grid $Z$ |
 |---|---|---|---|
 | 16 | 0.072 &nbsp;[0.011, 0.232] | 0.998 | 0.840 |
-| 32 | 0.100 &nbsp;[0.061, 0.529] | 0.969 | 0.966 |
+| 32 | 0.100 &nbsp;[0.061, 0.529] | 0.969 | 0.965 |
 | 64 | 0.504 &nbsp;[0.086, 0.637] | **0.9656** | 0.9655 |
 | 256 | 0.765 &nbsp;[0.608, 0.952] | 0.9655 | 0.9655 |
 | 2048 | 0.954 &nbsp;[0.919, 0.962] | 0.9655 | 0.9655 |
@@ -1202,7 +1202,7 @@ machine — §14 measured how little wall clock reproduces, so read them as orde
 of magnitude):
 
 ```bash
-pytest                          # 424 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 433 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)

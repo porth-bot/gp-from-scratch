@@ -13,8 +13,8 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers eleven of the sixteen sections so far**, and `NOT_YET` below names the
-other five explicitly rather than leaving the hole to be discovered:
+**It covers twelve of the sixteen sections so far**, and `NOT_YET` below names the
+other four explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
@@ -82,13 +82,14 @@ INSTRUMENTED = {
     "rff": "10.",
     "sparse": "11.",
     "fitc": "12.",
+    "rff_vs_sparse": "13.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
     "2.",
-    "13.", "14.", "15.", "16.",
+    "14.", "15.", "16.",
 ]
 
 
@@ -1209,6 +1210,158 @@ def test_section_12_trace_trend():
                      "§12 VFE uniform trace at M=6")
     assert_rounds_to(_mean(_col(unif["vfe"]["trace"], j20)), m.group(2),
                      "§12 VFE uniform trace at M=20")
+
+
+# -- Sec. 13: RFF vs sparse (experiments/rff_vs_sparse.py) -------------------
+
+
+def test_section_13_exact_sd():
+    """'exact GP: **0.9655**'."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    m = re.search(r"exact GP:\s*\*\*([\d.]+)\*\*", body)
+    assert m, "§13 exact GP sd not found"
+    assert_rounds_to(d["exact_sd"], m.group(1), "§13 exact GP sd")
+
+
+def test_section_13_sd_table():
+    """All cells of the posterior-sd-at-gap-centre table."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    sd = d["sd_table"]
+    for R_str, entry in sd.items():
+        R = int(R_str)
+        row = cells(body, str(R))
+        # The RFF cell uses &nbsp; between the median and the bracket range.
+        rff_text = row[1].replace("&nbsp;", " ").replace("\xa0", " ")
+        rff_parts = rff_text.split("[")
+        rff_med = rff_parts[0].strip()
+        rff_range = rff_parts[1].rstrip("]").split(",")
+        rff_min = rff_range[0].strip()
+        rff_max = rff_range[1].strip()
+        assert_rounds_to(entry["rff_median"], rff_med,
+                         f"§13 RFF median sd R={R}")
+        assert_rounds_to(entry["rff_min"], rff_min,
+                         f"§13 RFF min sd R={R}")
+        assert_rounds_to(entry["rff_max"], rff_max,
+                         f"§13 RFF max sd R={R}")
+        assert_rounds_to(entry["sgpr_quantile"], row[2],
+                         f"§13 SGPR quantile sd R={R}")
+        assert_rounds_to(entry["sgpr_grid"], row[3],
+                         f"§13 SGPR grid sd R={R}")
+
+
+def test_section_13_cost_to_accuracy_ranks():
+    """The rank thresholds in the cost-to-accuracy table."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    c2a = d["c2a"]
+    rff = c2a["RFF"]
+    assert rff["both"] is None, "§13 RFF 'both' should be 'never'"
+    assert rff["mean_only"] is None, "§13 RFF 'mean_only' should be 'never'"
+    rff_row = cells(body, "RFF")
+    assert rff["sd_only"]["rank"] == int(re.search(
+        r"R\s*=\s*(\d+)", rff_row[1].replace("$", "")).group(1)), \
+        "§13 RFF sd_only rank"
+    sgpr = c2a["SGPR (quantile Z)"]
+    sgpr_row = cells(body, "SGPR, quantile")
+    for idx, crit in ((1, "sd_only"), (2, "mean_only"), (3, "both")):
+        cell = sgpr_row[idx].replace("$", "")
+        m = re.search(r"R\s*=\s*(\d+)", cell)
+        assert m, f"§13 SGPR {crit} rank not found in cell {cell!r}"
+        assert sgpr[crit]["rank"] == int(m.group(1)), \
+            f"§13 SGPR {crit} rank"
+
+
+def test_section_13_rff_gap_mean_error():
+    """'its in-gap mean error is still 0.201 ... fallen only 3.1x'."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    m = re.search(
+        r"in-gap mean error is still\s*\n?\s*([\d.]+).*?"
+        r"fallen only ([\d.]+)",
+        body, re.S)
+    assert m, "§13 RFF gap mean error sentence not found"
+    assert_rounds_to(d["rff_mean_err_last"], m.group(1),
+                     "§13 RFF gap mean error at R=2048")
+    ratio = d["rff_mean_err_64"] / d["rff_mean_err_last"]
+    assert_rounds_to(ratio, m.group(2), "§13 RFF gap mean error fall ratio")
+
+
+def test_section_13_rff_outside_gap_error():
+    """'its error outside the gap is 0.006'."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    m = re.search(r"error outside the gap is (\d+\.\d+)", body)
+    assert m, "§13 RFF outside-gap error not found"
+    assert_rounds_to(d["rff_data_err_2048"], m.group(1),
+                     "§13 RFF data error at R=2048")
+
+
+def test_section_13_sgpr_r4_prior_return():
+    """'at R=4 SGPR reports the gap sd as 1.0000 ... mean is off by 1.35'."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    m = re.search(
+        r"gap sd\s+as (\d+\.\d+).*?mean is off by (\d+\.\d+)", body, re.S)
+    assert m, "§13 SGPR R=4 prior-return sentence not found"
+    assert_rounds_to(d["sgpr_sd_r4"], m.group(1), "§13 SGPR R=4 sd")
+    assert_rounds_to(d["sgpr_mean_err_gap_r4"], m.group(2),
+                     "§13 SGPR R=4 mean error")
+
+
+def test_section_13_grid_counterweight():
+    """'sd **0.371** at M=12 ... 2.6x overconfidence ... deficit of -0.66'."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    diag = d["dtc_diagnosis"]
+    grid_row = [r for r in diag["rows"] if r["rule"] == "grid"][0]
+    m = re.search(
+        r"sd \*\*(\d+\.\d+)\*\* at \$M\s*=\s*(\d+)\$.*?"
+        r"(\d+\.\d+).{0,5} overconfidence.*?"
+        r"deficit of \$(-?\d+\.\d+)\$",
+        body, re.S)
+    assert m, "§13 grid counterweight sentence not found"
+    assert_rounds_to(grid_row["sd"], m.group(1), "§13 grid sd at M=12")
+    assert int(m.group(2)) == diag["M"], "§13 grid M mismatch"
+    exact = diag["sd_exact"]
+    ratio = exact / grid_row["sd"]
+    assert_rounds_to(ratio, m.group(3), "§13 grid overconfidence ratio")
+    assert_rounds_to(d["grid_deficit_12"], m.group(4),
+                     "§13 grid worst deficit")
+
+
+def test_section_13_dtc_diagnosis_table():
+    """The DTC decomposition table at the gap centre."""
+    d = log("rff_vs_sparse")
+    body = section("13.")
+    diag = d["dtc_diagnosis"]
+    for row in diag["rows"]:
+        rule = row["rule"]
+        label = "data quantiles" if rule == "quantile" else "blind uniform grid"
+        c = cells(body, label)
+        c_clean = [v.replace("$", "") for v in c]
+        assert_rounds_to(row["nearest_z"], c_clean[1],
+                         f"§13 {rule} nearest z")
+        assert_rounds_to(row["margin"], c_clean[2],
+                         f"§13 {rule} margin")
+        assert_rounds_to(row["u_term"], c_clean[3],
+                         f"§13 {rule} u-term")
+        assert_rounds_to(row["sd"], c_clean[4],
+                         f"§13 {rule} sd")
+
+
+def test_section_13_rff_worse_than_grid():
+    """'RFF is still worse than the blind grid at every matched rank'."""
+    d = log("rff_vs_sparse")
+    sd = d["sd_table"]
+    exact = d["exact_sd"]
+    for R_str, entry in sd.items():
+        rff_err = abs(entry["rff_median"] - exact)
+        grid_err = abs(entry["sgpr_grid"] - exact)
+        assert rff_err >= grid_err, (
+            f"§13 at R={R_str} RFF err {rff_err:.4f} < grid err {grid_err:.4f}"
+        )
 
 
 # -- the instrument's own coverage -------------------------------------------

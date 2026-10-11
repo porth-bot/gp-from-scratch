@@ -51,7 +51,7 @@ import time
 
 import numpy as np
 
-from common import savefig
+from common import save_results, savefig
 import matplotlib.pyplot as plt
 
 from rff import LENGTHSCALE, NOISE_VAR, S2, dataset
@@ -390,6 +390,65 @@ def main():
           "the\n     safety margin k**-Q** and leaves the band to be inherited "
           "from a DTC\n     posterior over u that the data outside the gap has "
           "over-determined.)")
+
+    # ---- log ----------------------------------------------------------------
+    # Build the sd table at the ranks the README shows.
+    readme_ranks = [16, 32, 64, 256, 2048]
+    sd_table = {}
+    for R in readme_ranks:
+        i = RANKS.index(R)
+        r = curves["rff"][i]
+        sd_table[R] = {
+            "rff_median": r[0], "rff_min": r[1], "rff_max": r[2],
+            "sgpr_quantile": float(curves[("sgpr", "quantile")][i, 0]),
+            "sgpr_grid": float(curves[("sgpr", "grid")][i, 0]),
+        }
+
+    # Cost-to-accuracy: which rank first meets each criterion.
+    c2a_log = {}
+    for label in ("RFF", "SGPR (quantile Z)"):
+        d = c2a[label]
+        entry = {}
+        for crit in ("sd_only", "mean_only", "both"):
+            hit = d[crit]
+            entry[crit] = {"rank": hit[1]} if hit is not None else None
+        entry["mean_err"] = [float(v) for v in d["mean_err"]]
+        c2a_log[label] = entry
+
+    # RFF gap mean error at the last rank and the fall ratio.
+    rff_mean_err_last = float(c2a["RFF"]["mean_err"][-1])
+    rff_mean_err_64 = float(c2a["RFF"]["mean_err"][RANKS.index(64)])
+
+    # SGPR R=4 sd and mean error.
+    i4 = RANKS.index(4)
+    sgpr_sd_r4 = float(curves[("sgpr", "quantile")][i4, 0])
+    sgpr_mean_err_gap_r4 = float(collect(rows, ("sgpr", "quantile"),
+                                         "mean_err_gap")[i4, 0])
+
+    # Grid Z at M=12: sd, worst deficit, overconfidence ratio.
+    i12 = RANKS.index(12)
+    grid_sd_12 = float(curves[("sgpr", "grid")][i12, 0])
+    grid_deficit_12 = float(defic[("sgpr", "grid")][i12, 0])
+
+    # RFF outside-gap mean error at R=2048.
+    rff_data_err_2048 = float(collect(rows, "rff", "mean_err_data")[
+        RANKS.index(2048), 0])
+
+    save_results("rff_vs_sparse", {
+        "exact_sd": exact_sd,
+        "sd_table": sd_table,
+        "ranks": list(RANKS),
+        "c2a": c2a_log,
+        "span": span,
+        "rff_mean_err_last": rff_mean_err_last,
+        "rff_mean_err_64": rff_mean_err_64,
+        "rff_data_err_2048": rff_data_err_2048,
+        "sgpr_sd_r4": sgpr_sd_r4,
+        "sgpr_mean_err_gap_r4": sgpr_mean_err_gap_r4,
+        "grid_sd_12": grid_sd_12,
+        "grid_deficit_12": grid_deficit_12,
+        "dtc_diagnosis": diag,
+    })
 
     # ---- figure -------------------------------------------------------------
     fig, axes = plt.subplots(2, 2, figsize=(9.6, 7.0), constrained_layout=True)
