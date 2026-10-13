@@ -1542,7 +1542,7 @@ for something more specific than speed. A $13^3$ RationalQuadratic grid spends
 $2197$ fits and returns $\alpha = 50$ — **the top of its own grid**, which
 `on_edge` flags. Adam spends 250 and beats it ($-14.7515$ against $-14.7708$),
 but the three ascents finish at $\alpha = 57.8$, $63.6$ and $771$ while agreeing
-on $s^2$ and $\ell$ to three digits and on the evidence to $0.003$ nats. Neither
+on $s^2$ to 0.2%, on $\ell$ to 0.5% and on the evidence to $0.003$ nats. Neither
 method resolves $\alpha$, and the reason is structural rather than numerical:
 $\text{RQ} \to \text{RBF}$ as $\alpha\to\infty$, so the evidence really is flat
 in that direction and there is no interior optimum to find. The gradient's

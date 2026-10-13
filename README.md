@@ -1066,7 +1066,7 @@ Both grow with $s^2$: a bigger prior variance lets the latent run out into the
 region where $\log \sigma$ is linear rather than quadratic, and a Gaussian
 fitted at the mode is a poor description of a posterior with tails that heavy.
 Over a 256× range in $s^2$ the evidence error grows 25× and the worst
-probability error 140×.
+probability error 142×.
 
 **And $n$ barely moves it, which was not the expectation.** Bernstein–von Mises
 says the posterior concentrates and becomes Gaussian as data accumulates, so
@@ -1080,10 +1080,10 @@ the approximation should improve. At fixed $s^2=4$:
 | oracle ESS fraction | 0.270 | 0.112 | 0.019 | 0.0053 | 0.0016 |
 
 The total evidence error grows 1.4× while $n$ grows 8× — so *per observation*
-it falls 5.6×, which is the concentration effect, arriving as a much weaker
+it falls 5.7×, which is the concentration effect, arriving as a much weaker
 statement than "the approximation gets better". The probability error does not
 improve at all over this range. **The honest caveat is in the same table:** the
-oracle's effective sample size falls 165× across it and its own standard error
+oracle's effective sample size falls 166× across it and its own standard error
 grows 12×, so at $n=32$ the measurement is 4.6 standard errors from zero and
 would not survive being pushed much further. The oracle runs out before the
 method does, and that is a statement about the oracle.
@@ -1149,7 +1149,7 @@ points, at 70% of the cost, and no sign of the multimodality §5 found under a
 Gaussian likelihood. The three-parameter row is the argument, and it is not
 about speed. The grid spends 6× more fits and returns a boundary value for
 $\alpha$; the ascents beat it from every start but finish at $\alpha$ values a
-factor of 13 apart while agreeing on $s^2$ and $\ell$ to three digits and on the
+factor of 13 apart while agreeing on $s^2$ to 0.2%, on $\ell$ to 0.5% and on the
 evidence to 0.003 nats. **Neither method resolves $\alpha$** — RQ tends to RBF
 as $\alpha\to\infty$, so the evidence is genuinely flat in that direction and
 there is no interior optimum to find. What the gradient buys is making that
@@ -1202,7 +1202,7 @@ machine — §14 measured how little wall clock reproduces, so read them as orde
 of magnitude):
 
 ```bash
-pytest                          # 433 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 443 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -1325,7 +1325,7 @@ monthly record), is committed, so there is nothing to download.
   approximation — so §16's numbers are what *Laplace* costs, not what
   approximate inference costs. And **the oracle that measures all of it runs
   out before the method does**: prior importance sampling has an effective
-  sample size that falls 165× between $n=4$ and $n=32$, so nothing above
+  sample size that falls 166× between $n=4$ and $n=32$, so nothing above
   $n \approx 32$ is checked against an exact answer at all. And **the gradient
   does not make a flat direction identifiable**: on a three-parameter RQ kernel
   three ascents agree on the evidence to 0.003 nats while landing a factor of 13

@@ -13,8 +13,8 @@ now writes the quantities its section quotes to `logs/<name>.json` beside the
 figure it saves, and `reproduce.sh` reports a log that comes back different the
 same way it reports a figure that does. This file is the second half.
 
-**It covers twelve of the sixteen sections so far**, and `NOT_YET` below names the
-other four explicitly rather than leaving the hole to be discovered:
+**It covers fourteen of the sixteen sections so far**, and `NOT_YET` below names
+the other two explicitly rather than leaving the hole to be discovered:
 `test_every_result_section_is_either_instrumented_or_listed` fails when a
 section is added or renamed, so extending the README forces a decision about
 its numbers instead of quietly widening the gap. Sections go in as their
@@ -83,13 +83,14 @@ INSTRUMENTED = {
     "sparse": "11.",
     "fitc": "12.",
     "rff_vs_sparse": "13.",
+    "laplace": "16.",
 }
 
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
     "2.",
-    "14.", "15.", "16.",
+    "14.", "15.",
 ]
 
 
@@ -1362,6 +1363,231 @@ def test_section_13_rff_worse_than_grid():
         assert rff_err >= grid_err, (
             f"§13 at R={R_str} RFF err {rff_err:.4f} < grid err {grid_err:.4f}"
         )
+
+
+# -- Sec. 16: Laplace (experiments/laplace.py) -------------------------------
+
+def _sec16():
+    """§16 is the last `###` section, so cut it at the next `##` heading."""
+    return section("16.").split("\n## ", 1)[0]
+
+
+def _sec16_tables():
+    """§16's amplitude and size sweeps share row labels, so split them first."""
+    body = _sec16()
+    amp, rest = body.split("**And $n$ barely moves it", 1)
+    return amp, rest
+
+
+def _sec16_gradient_rows():
+    body = _sec16()
+    after = body.split("24 points, 15% flipped labels", 1)[1]
+    lines = after.lstrip("\n").splitlines()
+    rows = []
+    for ln in lines[next(k for k, x in enumerate(lines) if x.startswith("|")):]:
+        if not ln.startswith("|"):
+            break
+        rows.append(ln)
+    return [[c.strip().replace("**", "").replace("−", "-")
+             for c in re.split(r"(?<!\\)\|", r.strip().strip("|"))]
+            for r in rows if not r.startswith("| kernel") and not r.startswith("|---")]
+
+
+def test_section_16_gaussian_control_is_exact():
+    c = log("laplace")["control"]
+    row = cells(_sec16(), "max abs. difference")
+    assert_formats_to(c["mean"], row[1], "Sec. 16 control mean diff")
+    assert_formats_to(c["var"], row[2], "Sec. 16 control var diff")
+    assert_formats_to(c["log_ml"], row[3], "Sec. 16 control log p(y) diff")
+    assert int(row[4]) == c["n_iter"] == 2
+    assert "Two iterations" in _sec16()
+
+
+def test_section_16_amplitude_table():
+    amp_rows = log("laplace")["amplitude"]
+    amp, _ = _sec16_tables()
+    header = cells(amp, "$s^2$")[1:]
+    assert [float(h) for h in header] == [r["s2"] for r in amp_rows]
+    for label, key in [
+        (r"$\log \hat Z - \log Z$ (nats)", "log_Z_err"),
+        ("oracle's own sd", "log_Z_sd"),
+        (r"$\max_x \lvert \Delta p \rvert$", "prob_err"),
+        ("latent sd, Laplace / exact", "latent_sd_ratio"),
+        ("oracle ESS fraction", "ess_frac"),
+    ]:
+        printed = cells(amp, label)[1:]
+        assert len(printed) == len(amp_rows)
+        for r, cell in zip(amp_rows, printed):
+            assert_rounds_to(r[key], cell, f"Sec. 16 amplitude {label} s2={r['s2']}")
+
+
+def test_section_16_error_is_one_signed_and_grows_with_the_prior():
+    rows = log("laplace")["amplitude"] + log("laplace")["size"]
+    assert all(r["log_Z_err"] < 0 for r in rows), "evidence not always under"
+    assert all(r["latent_sd_ratio"] < 1 for r in rows), "latent sd not always narrow"
+    amp = log("laplace")["amplitude"]
+    errs = [-r["log_Z_err"] for r in amp]
+    dps = [r["prob_err"] for r in amp]
+    assert errs == sorted(errs) and dps == sorted(dps)
+    body = _sec16()
+    assert_rounds_to(errs[-1] / errs[0],
+                     quoted(body, r"evidence error grows (\d+)×"),
+                     "Sec. 16 evidence-error growth over s2")
+    assert_rounds_to(dps[-1] / dps[0],
+                     quoted(body, r"worst\s+probability error (\d+)×"),
+                     "Sec. 16 probability-error growth over s2")
+
+
+def test_section_16_size_table():
+    size_rows = log("laplace")["size"]
+    _, rest = _sec16_tables()
+    header = cells(rest, "$n$")[1:]
+    assert [int(h) for h in header] == [r["n"] for r in size_rows]
+    for label, key in [
+        (r"$\log \hat Z - \log Z$", "log_Z_err"),
+        ("oracle's own sd", "log_Z_sd"),
+        (r"$\max_x \lvert \Delta p \rvert$", "prob_err"),
+        ("oracle ESS fraction", "ess_frac"),
+    ]:
+        printed = cells(rest, label)[1:]
+        assert len(printed) == len(size_rows)
+        for r, cell in zip(size_rows, printed):
+            assert_rounds_to(r[key], cell, f"Sec. 16 size {label} n={r['n']}")
+
+
+def test_section_16_size_prose():
+    s = log("laplace")["size"]
+    first, last = s[0], s[-1]
+    body = _sec16()
+    growth = last["log_Z_err"] / first["log_Z_err"]
+    assert_rounds_to(growth, quoted(body, r"error grows ([\d.]+)× while \$n\$ grows"),
+                     "Sec. 16 evidence error growth over n")
+    assert int(quoted(body, r"while \$n\$ grows (\d+)×")) == last["n"] // first["n"]
+    assert_rounds_to((last["n"] / first["n"]) / growth,
+                     quoted(body, r"it falls ([\d.]+)×, which is the concentration"),
+                     "Sec. 16 per-observation fall")
+    assert_rounds_to(first["ess_frac"] / last["ess_frac"],
+                     quoted(body, r"effective sample size falls (\d+)× across"),
+                     "Sec. 16 oracle ESS fall")
+    assert_rounds_to(last["log_Z_sd"] / first["log_Z_sd"],
+                     quoted(body, r"standard error\s+grows (\d+)×"),
+                     "Sec. 16 oracle sd growth")
+    assert_rounds_to(abs(last["log_Z_err"]) / last["log_Z_sd"],
+                     quoted(body, r"measurement is ([\d.]+) standard errors"),
+                     "Sec. 16 n=32 significance")
+
+
+def test_section_16_plugin_shortcut():
+    d = log("laplace")["demo"]
+    body = _sec16()
+    assert_rounds_to(d["plugin_gap"], quoted(body, r"reaches \*\*([\d.]+) in probability"),
+                     "Sec. 16 plug-in gap")
+    assert_rounds_to(d["laplace_err"],
+                     quoted(body, r"against the exact answer is ([\d.]+)\*\*"),
+                     "Sec. 16 Laplace probability error on the demo")
+    assert_rounds_to(d["plugin_gap"] / d["laplace_err"],
+                     quoted(body, r"The shortcut is ([\d.]+)× worse"),
+                     "Sec. 16 plug-in over Laplace")
+
+
+def test_section_16_grid_search_table():
+    surf = {s["flip"]: s for s in log("laplace")["surfaces"]}
+    body = _sec16()
+    for label, flip in [("separable", 0.0), ("15% flipped", 0.15)]:
+        row = cells(body, label)
+        s = surf[flip]
+        assert s["edges"] == [], f"Sec. 16 {label} grid argmax is on an edge"
+        assert_rounds_to(s["best"][0], row[1], f"Sec. 16 {label} s2")
+        assert_rounds_to(s["best"][1], row[2], f"Sec. 16 {label} l")
+        assert_rounds_to(s["best_log_ml"], row[3], f"Sec. 16 {label} log Z")
+    assert_rounds_to(surf[0.0]["best"][0],
+                     quoted(body, r"finds the real one at \$s\^2 = (\d+)\$"),
+                     "Sec. 16 widened-grid optimum")
+    assert_rounds_to(surf[0.0]["best"][0] / surf[0.15]["best"][0],
+                     quoted(body, r"The amplitude moves \*\*(\d+)×\*\*"),
+                     "Sec. 16 amplitude ratio")
+    assert surf[0.0]["best"][1] == surf[0.15]["best"][1], "lengthscale moved"
+
+
+def test_section_16_gradient_vs_grid_table():
+    rbf, rq = log("laplace")["gradient"]
+    rows = _sec16_gradient_rows()
+    assert len(rows) == 4
+    rbf_grid, rbf_adam, rq_grid, rq_adam = rows
+
+    assert int(rbf_grid[2]) == rbf["grid"]["fits"]
+    s2, l = re.findall(r"= ([\d.]+)\$", rbf_grid[3])
+    assert_rounds_to(rbf["grid"]["best"][0], s2, "Sec. 16 RBF grid s2")
+    assert_rounds_to(rbf["grid"]["best"][1], l, "Sec. 16 RBF grid l")
+    assert_rounds_to(rbf["grid"]["log_ml"], rbf_grid[4], "Sec. 16 RBF grid log Z")
+
+    assert rbf_adam[2] == f"{rbf['ascents'][0]['fits']} each"
+    s2, l = re.findall(r"\$([\d.]+)\$", rbf_adam[3])
+    for a in rbf["ascents"]:  # "all three"
+        assert_rounds_to(a["theta"][0], s2, "Sec. 16 RBF ascent s2")
+        assert_rounds_to(a["theta"][1], l, "Sec. 16 RBF ascent l")
+        assert_rounds_to(a["log_ml"], rbf_adam[4], "Sec. 16 RBF ascent log Z")
+
+    assert int(rq_grid[2]) == rq["grid"]["fits"]
+    assert rq["grid"]["edges"] == [2], "RQ grid argmax should sit on the alpha edge"
+    assert_rounds_to(rq["grid"]["best"][2], quoted(rq_grid[3], r"alpha = (\d+)\$"),
+                     "Sec. 16 RQ grid alpha")
+    assert_rounds_to(rq["grid"]["log_ml"], rq_grid[4], "Sec. 16 RQ grid log Z")
+
+    alphas = re.findall(r"\$?([\d.]+)\$", rq_adam[3])
+    assert len(alphas) == 3
+    for a, cell in zip(sorted(x["theta"][2] for x in rq["ascents"]), alphas):
+        assert_rounds_to(a, cell, "Sec. 16 RQ ascent alpha (listed ascending)")
+    lo, hi = [c.strip() for c in rq_adam[4].split("…")]
+    lms = [a["log_ml"] for a in rq["ascents"]]
+    assert_rounds_to(min(lms), lo, "Sec. 16 RQ ascent worst log Z")
+    assert_rounds_to(max(lms), hi, "Sec. 16 RQ ascent best log Z")
+    assert all(lm > rq["grid"]["log_ml"] for lm in lms), "ascents should beat the grid"
+
+
+def test_section_16_gradient_prose():
+    rbf, rq = log("laplace")["gradient"]
+    body = _sec16()
+    assert_rounds_to(100 * rbf["ascents"][0]["fits"] / rbf["grid"]["fits"],
+                     quoted(body, r"at (\d+)% of the cost"), "Sec. 16 ascent cost share")
+    assert_rounds_to(rq["grid"]["fits"] / rbf["grid"]["fits"],
+                     quoted(body, r"The grid spends (\d+)× more fits"),
+                     "Sec. 16 RQ grid over RBF grid")
+    alphas = [a["theta"][2] for a in rq["ascents"]]
+    s2s = [a["theta"][0] for a in rq["ascents"]]
+    ls = [a["theta"][1] for a in rq["ascents"]]
+    lms = [a["log_ml"] for a in rq["ascents"]]
+    spread = lambda v: 100 * (max(v) - min(v)) / np.mean(v)  # noqa: E731
+    assert_rounds_to(max(alphas) / min(alphas),
+                     quoted(body, r"factor of (\d+) apart while"), "Sec. 16 alpha spread")
+    assert_rounds_to(spread(s2s), quoted(body, r"on \$s\^2\$ to ([\d.]+)%"),
+                     "Sec. 16 RQ ascent s2 spread")
+    assert_rounds_to(spread(ls), quoted(body, r"on \$\\ell\$ to ([\d.]+)%"),
+                     "Sec. 16 RQ ascent l spread")
+    assert_rounds_to(max(lms) - min(lms),
+                     quoted(body, r"evidence to ([\d.]+) nats"), "Sec. 16 evidence spread")
+
+
+def test_section_16_limitations_paragraph():
+    """The Limitations bullet carries its own copy of §16's numbers."""
+    L = log("laplace")
+    amp, size = L["amplitude"], L["size"]
+    rq = L["gradient"][1]
+    para = quoted(README, r"(\*\*Non-Gaussian likelihoods reach as far as Laplace[\s\S]*?)\n(?:- \*\*|## )")
+    assert_rounds_to(-amp[0]["log_Z_err"], quoted(para, r"— ([\d.]+)\s+nats at \$s\^2=0.25\$"),
+                     "Limitations evidence error at s2=0.25")
+    assert_rounds_to(-amp[-1]["log_Z_err"], quoted(para, r"and ([\d.]+) at \$s\^2=64\$"),
+                     "Limitations evidence error at s2=64")
+    assert_rounds_to(size[-1]["log_Z_err"] / size[0]["log_Z_err"],
+                     quoted(para, r"moves it\s+([\d.]+)×"), "Limitations growth over n")
+    assert_rounds_to(size[0]["ess_frac"] / size[-1]["ess_frac"],
+                     quoted(para, r"falls (\d+)× between"), "Limitations oracle ESS fall")
+    lms = [a["log_ml"] for a in rq["ascents"]]
+    assert_rounds_to(max(lms) - min(lms), quoted(para, r"evidence to ([\d.]+) nats"),
+                     "Limitations evidence spread")
+    alphas = [a["theta"][2] for a in rq["ascents"]]
+    assert_rounds_to(max(alphas) / min(alphas), quoted(para, r"a factor of (\d+)\s+apart"),
+                     "Limitations alpha spread")
 
 
 # -- the instrument's own coverage -------------------------------------------
