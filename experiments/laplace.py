@@ -48,7 +48,8 @@ parameters, and the three-parameter case is the one that says something: both
 methods agree on the two identified parameters and neither resolves the third,
 because the evidence is genuinely flat in it.
 
-Outputs: figures/laplace.png, and the numbers in the printed tables.
+Outputs: figures/laplace.png, and logs/laplace.json with every number the
+README quotes (wall-clock seconds left out: they belong to the machine).
 """
 
 import argparse
@@ -56,7 +57,7 @@ import time
 
 import numpy as np
 
-from common import savefig
+from common import save_results, savefig
 from gp.gp import GPRegressor
 from gp.kernels import RBF, RationalQuadratic
 from gp.laplace import (Bernoulli, GaussianLikelihood, LaplaceGP, grid_search,
@@ -298,7 +299,7 @@ def on_edge(table, grids):
     maximum, and reporting a boundary point as "the ML-II optimum" is how a
     too-small grid becomes a published number. The first version of the sweep
     below did exactly that -- it stopped at ``s2 = 64`` and reported 64 -- and
-    the real optimum for the separable arm is at 271. So the check is run and
+    the real optimum for the separable arm is at 245. So the check is run and
     printed rather than left to whoever reads the table.
     """
     idx = np.unravel_index(int(np.argmax(table)), table.shape)
@@ -563,6 +564,23 @@ def main(quick=False):
                   f"  [{r['fits']} fits, {r['secs']:.2f}s]")
 
     figure(d, amp, size, surfaces)
+    save_results("laplace", {
+        "control": {k: control[k] for k in ("mean", "var", "log_ml", "n_iter")},
+        "amplitude": amp,
+        "size": size,
+        "demo": {"plugin_gap": gap,
+                 "laplace_err": float(np.max(np.abs(d["p_avg"] - d["oprob"]))),
+                 "sd_max": float(d["sd"].max())},
+        "surfaces": [{k: s[k] for k in ("flip", "best", "best_log_ml", "edges")}
+                     for s in surfaces],
+        "gradient": [{
+            "name": case["name"],
+            "params": case["params"],
+            "grid": {k: case["grid"][k] for k in ("best", "log_ml", "fits", "edges")},
+            "ascents": [{k: r[k] for k in ("start", "theta", "log_ml", "fits")}
+                        for r in case["ascents"]],
+        } for case in gv["cases"]],
+    })
     return control, amp, size, d, surfaces, gv
 
 
