@@ -27,9 +27,19 @@ LOGDIR = os.path.join(os.path.dirname(__file__), "..", "logs")
 
 
 def savefig(fig, name):
+    """Write ``fig`` to ``figures/<name>`` and close it.
+
+    ``metadata={"Software": None}`` drops the tEXt chunk matplotlib stamps
+    into every PNG ("Matplotlib version3.11.0, ..."). Nothing renders it, but
+    it ties the file's bytes to the matplotlib patch release: on 3.11.2 every
+    regenerated figure differed from its committed copy with identical pixels,
+    so the byte-for-byte check at the end of ``reproduce.sh`` would have
+    flagged all 21 and drowned the one real drift it exists to catch. Without
+    the chunk, a byte difference means a pixel difference again.
+    """
     os.makedirs(FIGDIR, exist_ok=True)
     path = os.path.abspath(os.path.join(FIGDIR, name))
-    fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path, bbox_inches="tight", metadata={"Software": None})
     plt.close(fig)
     print(f"saved {path}")
 
