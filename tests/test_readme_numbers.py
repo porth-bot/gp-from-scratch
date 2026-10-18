@@ -72,6 +72,7 @@ README = (ROOT / "README.md").read_text()
 # the "### N." the section heading opens with.
 INSTRUMENTED = {
     "validate": "1.",
+    "co2": "2.",
     "ntk_experiments": "3.",
     "sklearn_parity": "4.",
     "heteroscedastic": "5.",
@@ -89,7 +90,6 @@ INSTRUMENTED = {
 # The sections whose experiments do not write a log yet. Listed, not silent:
 # the test below pins this against the README's own headings.
 NOT_YET = [
-    "2.",
     "14.", "15.",
 ]
 
@@ -220,6 +220,144 @@ def test_section_1_hyperparameter_recovery_table():
         )
         assert_rounds_to(rec["median"][key], median,
                          f"Sec. 1 median ML-II estimate of {key}")
+
+
+# -- Sec. 2: Mauna Loa CO2 (experiments/co2.py) -----------------------------
+
+CO2_ROWS = (
+    ("ML-II, trend + season + short", "base"),
+    ("ML-II, + RationalQuadratic", "rq"),
+    ("ML-II, + RBF", "rbf"),
+)
+
+
+def unit(cell: str, suffix: str) -> str:
+    assert cell.endswith(suffix), f"{cell!r} does not end in {suffix!r}"
+    return cell[: -len(suffix)].strip()
+
+
+def test_section_2_hand_set_row():
+    ref = log("co2")["handset"]
+    _, lml, rmse, cover, trend = cells(section("2."), "hand-set init")
+    assert lml == "—"
+    assert_rounds_to(ref["rmse"], unit(rmse, "ppm"), "Sec. 2 hand-set RMSE")
+    assert_rounds_to(ref["cover"], cover, "Sec. 2 hand-set coverage")
+    assert_rounds_to(ref["trend_l"], unit(trend, "yr"), "Sec. 2 hand-set trend l")
+
+
+@pytest.mark.parametrize("row, arm", CO2_ROWS)
+def test_section_2_ml_ii_rows(row, arm):
+    a = log("co2")["arms"][arm]
+    _, lml, rmse, cover, trend = cells(section("2."), row)
+    init, best = (x.strip() for x in lml.split("→"))
+    assert_rounds_to(a["lml0"], init, f"Sec. 2 {arm} initial LML")
+    assert_rounds_to(a["lml"], best, f"Sec. 2 {arm} best LML")
+    assert_rounds_to(a["rmse"], unit(rmse, "ppm"), f"Sec. 2 {arm} RMSE")
+    assert_rounds_to(a["cover"], cover, f"Sec. 2 {arm} coverage")
+    assert_rounds_to(a["trend_l"], unit(trend, "yr"), f"Sec. 2 {arm} trend l")
+
+
+def test_section_2_the_data_and_the_split():
+    c = log("co2")
+    assert_rounds_to(c["horizon"], quoted(section("2."), r"\(([\d.]+) years the model"),
+                     "Sec. 2 held-out horizon")
+    head = README.split("## Problem")[0]
+    assert int(quoted(head, r"CO₂, (\d+) monthly means")) == c["n_obs"]
+    first, last = quoted(head, r"monthly means \((\d{4}–\d{4})\)").split("–")
+    assert (int(first), int(last)) == (int(c["t_min"]), int(c["t_max"]))
+    # "twelve free hyperparameters": eleven in the kernel plus the noise.
+    assert "whose twelve free hyperparameters" in head and c["full_fit"]["n_free"] == 12
+
+
+def test_section_2_the_runs_are_converged_at_800_steps():
+    """"the last quarter of the run is worth +0.03 nats or less in every arm".
+
+    It read +0.02 until this file existed; the RQ arm's last quarter is
+    +0.027, which the script itself prints as +0.03.
+    """
+    arms = log("co2")["arms"]
+    claim = quoted(section("2."), r"worth \$\+([\d.]+)\$\s+nats or less")
+    worst = max(a["last_quarter"] for a in arms.values())
+    assert_rounds_to(worst, claim, "Sec. 2 largest last-quarter LML gain")
+
+
+def test_section_2_ratios_and_gaps_in_the_prose():
+    c = log("co2")
+    base, rq, rbf, ref = (c["arms"]["base"], c["arms"]["rq"], c["arms"]["rbf"],
+                          c["handset"])
+    body = section("2.")
+    assert_rounds_to(base["rmse"] / rq["rmse"],
+                     quoted(body, r"RMSE falls ([\d.]+)×"), "Sec. 2 RMSE ratio")
+    assert_rounds_to(100 * abs(rbf["rmse"] - rq["rmse"]) / rq["rmse"],
+                     quoted(body, r"(\d+)% from RQ's"), "Sec. 2 RQ-vs-RBF RMSE gap")
+    assert_rounds_to(rq["lml"] - rbf["lml"],
+                     quoted(body, r"preferring\s+RQ\s+by\s+([\d.]+)\s+nats"),
+                     "Sec. 2 evidence margin for RQ")
+    assert_rounds_to(100 * rq["cover"], quoted(body, r"covers (\d+)% of"),
+                     "Sec. 2 best ML-II coverage")
+    assert_rounds_to(100 * ref["cover"], quoted(body, r"hand-set kernel's\s+(\d+)%"),
+                     "Sec. 2 hand-set coverage in prose")
+    # "closes 87% of the RMSE gap ... about a quarter of the coverage gap
+    # (0.09 → 0.32 against a nominal 0.95)". It read "about two-thirds" and
+    # "none of the coverage gap" until this file existed.
+    closed = (base["rmse"] - rq["rmse"]) / (base["rmse"] - ref["rmse"])
+    assert_rounds_to(100 * closed, quoted(body, r"closes (\d+)% of the RMSE"),
+                     "Sec. 2 share of the RMSE gap closed")
+    cov_closed = (rq["cover"] - base["cover"]) / (0.95 - base["cover"])
+    assert 0.2 < cov_closed < 0.3, f"'about a quarter' of the coverage gap: {cov_closed:.3f}"
+    pair = re.findall(r"\((0\.\d+) → (0\.\d+)\s+against a nominal 0\.95\)", body)
+    assert len(pair) == 1
+    assert_rounds_to(base["cover"], pair[0][0], "Sec. 2 base coverage in prose")
+    assert_rounds_to(rq["cover"], pair[0][1], "Sec. 2 RQ coverage in prose")
+    # Limitations repeats the ratio and the coverage.
+    lim = README.split("## Limitations")[1].split("\n## ")[0]
+    assert_rounds_to(base["rmse"] / rq["rmse"],
+                     quoted(lim, r"hold-out RMSE falls ([\d.]+)×"), "Limitations RMSE ratio")
+    assert_rounds_to(100 * rq["cover"], quoted(lim, r"still covers (\d+)% of"),
+                     "Limitations coverage")
+
+
+def test_section_2_the_fitted_scale_mixture_at_a_20_year_lag():
+    """The sentence used to quote 1.7%, which is the hand-set RQ at 20 yr
+    (0.0115 / 0.66, the walkthrough's number), not the fitted one whose
+    difference the evidence is said to see. Fitted, alpha falls to 0.098 and
+    the 20-year share is 55%."""
+    c = log("co2")
+    body = section("2.")
+    alpha = c["arms"]["rq"]["theta"][8]
+    assert_rounds_to(alpha, quoted(body, r"falls from 0\.78\s+to\s+([\d.]+), a very"),
+                     "Sec. 2 fitted RQ alpha")
+    assert_rounds_to(100 * c["lag20_share"]["rq"],
+                     quoted(body, r"still carries (\d+)% of its own\s+variance"),
+                     "Sec. 2 fitted RQ share at a 20-yr lag")
+    assert_formats_to(c["lag20_share"]["rbf"],
+                      quoted(body, r"fitted RBF carries \$(\d)\\times10\^\{-10\}\$")
+                      + "e-10", "Sec. 2 fitted RBF share at a 20-yr lag")
+
+
+def test_section_2_kernel_walkthrough_readings():
+    w = log("co2")["walkthrough"]
+    body = section("2.")
+    assert_rounds_to(w["prior_var"], quoted(body, r"= ([\d.]+)`\s+ppm²"),
+                     "Sec. 2 prior variance")
+    assert_rounds_to(w["seasonal"]["0.5"], quoted(body, r"`4\.0 → ([\d.]+)`"),
+                     "Sec. 2 seasonal at half a year")
+    assert_rounds_to(w["seasonal"]["1"], quoted(body, r"in phase \(`≈ ([\d.]+)`\)"),
+                     "Sec. 2 seasonal at one year")
+    assert_rounds_to(w["seasonal"]["10"], quoted(body, r"still `≈ ([\d.]+)`"),
+                     "Sec. 2 seasonal at ten years")
+    assert_rounds_to(w["short"]["1"], quoted(body, r"falls from\s+`([\d.]+)` at one year"),
+                     "Sec. 2 Matern at one year")
+    assert_rounds_to(w["short"]["3"], quoted(body, r"`([\d.]+)` at three"),
+                     "Sec. 2 Matern at three years")
+    assert_rounds_to(w["medium"]["1"], quoted(body, r"`0\.66 → ([\d.]+)` at a year"),
+                     "Sec. 2 RQ init at one year")
+    assert_rounds_to(w["medium"]["5"], quoted(body, r"`([\d.]+)` at five"),
+                     "Sec. 2 RQ init at five years")
+    assert_rounds_to(w["medium"]["20"], quoted(body, r"still `([\d.]+)` at\s+\*\*twenty"),
+                     "Sec. 2 RQ init at twenty years")
+    assert_rounds_to(w["medium_rbf_log"], quoted(body, r"\$e\^\{(-\d+)\}\$"),
+                     "Sec. 2 RBF log-share at twenty years")
 
 
 # -- Sec. 3: wide networks are GPs (experiments/ntk_experiments.py) --------

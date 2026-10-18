@@ -131,10 +131,13 @@ The seasonal **period is frozen at exactly 1 year** — known physics, and a
 numerical necessity: near a phase mismatch the periodic log-period gradient is
 $\sim\!10^3$ at init, which destabilized Adam and made an earlier free-period
 run diverge and fall back to its initialization. With the period pinned, the
-remaining hyperparameters optimize smoothly at `lr=0.01` over 800 steps — and
-they are converged there, not merely stopped: the last quarter of the run is
-worth $+0.02$ nats or less in every arm below, and doubling to 2000 steps moves
-no hold-out RMSE by more than 0.001 ppm.
+remaining hyperparameters optimize smoothly at `lr=0.01` over 800 steps. The
+last quarter of the run is worth $+0.03$ nats or less in every arm below. Two
+of the three ML-II arms are converged there: at 2000 steps their hold-out RMSE
+moves by under 0.0001 ppm. The RationalQuadratic arm is still creeping: 2000
+steps buy it another 0.06 nats, move its RMSE by 0.0015 ppm (3.19 either way),
+shorten its trend from 107 to 105 yr and lift its coverage from 0.32 to 0.35.
+No conclusion below changes.
 
 **Honest out-of-sample evaluation.** Fit on data before 2015, forecast the
 held-out 2015–2026 months (11.4 years the model never sees):
@@ -161,22 +164,23 @@ is now measured rather than argued.
 
 **But it is not RationalQuadratic's heavy tail that fixes it, which is what
 this experiment was run to show.** Put an ordinary RBF in the same slot with
-the same init and the hold-out lands at 3.22 ppm — 1% from RQ's 3.19, with the
-same 109-yr trend. What the model was missing was a medium-term component of
-*any* shape: something to absorb structure at a few years that was otherwise
-being paid for out of the trend's lengthscale. The scale mixture is not
-invisible — at a 20-year lag RQ still carries 1.7% of its variance where the
-RBF has none, and the **evidence can see exactly that**, preferring RQ by 6.6
-nats. The 11-year forecast cannot. Two model-selection criteria disagreeing
-about a difference one of them resolves and the other cannot even detect.
+the same init and the hold-out lands at 3.22 ppm — 1% from RQ's 3.19, with
+nearly the same trend (109 yr against 107). What the model was missing was a
+medium-term component of *any* shape: something to absorb structure at a few
+years that was otherwise being paid for out of the trend's lengthscale. The
+scale mixture is not invisible. Fitted, RQ's shape parameter falls from 0.78 to
+0.098, a very heavy tail: at a 20-year lag it still carries 55% of its own
+variance, where the fitted RBF carries $3\times10^{-10}$. The **evidence can
+see exactly that**, preferring RQ by 6.6 nats. The 11-year forecast cannot. Two
+model-selection criteria disagreeing about a difference one of them resolves and the other cannot even detect.
 
-**And none of it fixes the calibration.** The best ML-II fit covers 32% of
+**And it barely moves the calibration.** The best ML-II fit covers 32% of
 held-out points inside its nominal 95% band, against the hand-set kernel's
 97%. The RMSE improved 2.5× and the error bars are still wrong by a factor. So
 the section's result stands with a sharper edge on it: ML-II maximizes
-evidence, not forecast skill, and the standard remedy closes about two-thirds
-of the RMSE gap and none of the coverage gap. Reported as measured, not tuned
-to the held-out set. (This closes
+evidence, not forecast skill, and the standard remedy closes 87% of the RMSE
+gap to the hand-set kernel and about a quarter of the coverage gap (0.09 → 0.32
+against a nominal 0.95). Reported as measured, not tuned to the held-out set. (This closes
 [issue #2](https://github.com/porth-bot/gp-from-scratch/issues/2), which
 predicted only the first half of that.)
 
@@ -1202,7 +1206,7 @@ machine — §14 measured how little wall clock reproduces, so read them as orde
 of magnitude):
 
 ```bash
-pytest                          # 480 tests (incl. docstring examples); RuntimeWarnings are errors
+pytest                          # 490 tests (incl. docstring examples); RuntimeWarnings are errors
 mypy                            # static type check of the public API (gp/)
 cd experiments
 python prior_samples.py         # ~1 s  (kernel prior gallery)
@@ -1304,8 +1308,9 @@ monthly record), is committed, so there is nothing to download.
   those values; §8.6 of the theory doc sketches the reparameterization that
   would make the map differentiable in $\ell$.
 - **ML-II still extrapolates the CO₂ series worse than the hand-set kernel**,
-  and the standard remedy only halves the problem. A medium-term term takes the
-  mean-reversion pressure off the trend and the hold-out RMSE falls 2.5×, but
+  and the standard remedy fixes the forecast's level but not its error bars.
+  A medium-term term takes the mean-reversion pressure off the trend and the
+  hold-out RMSE falls 2.5×, but
   the fit still covers 32% of held-out points in a nominal 95% band (§2), so
   what is left is not a missing kernel component — it is that a stationary
   covariance is the wrong prior for an unbounded trend, and that ML-II is
