@@ -40,14 +40,14 @@ The control is the point. If the fix is RationalQuadratic's heavy tail -- a
 scale mixture carrying several lengthscales at once -- then an ordinary RBF in
 the same slot, with the same init, should not reproduce it. Measured below.
 
-Run:  python experiments/co2.py    (~3 min: four ML-II fits on n~700)
+Run:  python experiments/co2.py    (~6 min: four ML-II fits on n~700)
 """
 
 import os
 
 import numpy as np
 
-from common import plt, savefig
+from common import plt, save_results, savefig
 from gp.gp import GPRegressor
 from gp.kernels import RBF, Matern, Periodic, RationalQuadratic
 from gp.optimize import adam_maximize
@@ -143,12 +143,15 @@ def main(steps=800):
         assert lml_best > lml0, f"{label}: ML-II must improve the marginal likelihood"
         rmse, cover = heldout(model, ym)
         trend_l = float(np.exp(model.kernel.theta[1]))
-        rows[medium] = dict(lml=lml_best, rmse=rmse, cover=cover, trend_l=trend_l)
         # How much of the climb arrived in the last quarter of the run: the
         # cheap, always-printed version of "is 800 steps enough?". The
-        # expensive version is --steps 2000, which moves no RMSE here by more
-        # than 0.001 ppm.
+        # expensive version is --steps 2000: base and control do not move,
+        # the RQ arm gains 0.06 nats and its RMSE moves 0.0015 ppm.
         tail = lml_best - max(hist[:-len(hist) // 4])
+        rows[medium] = dict(lml0=lml0, lml=lml_best, rmse=rmse, cover=cover,
+                            trend_l=trend_l, last_quarter=tail,
+                            theta=np.exp(model.kernel.theta),
+                            noise_var=model.noise_var)
         print(f"  {label:<26} {lml0:7.1f} ->{lml_best:8.1f}  {rmse:8.2f}  "
               f"{cover:7.2f}  {trend_l:6.0f} yr  {tail:+9.2f}")
 
@@ -166,13 +169,37 @@ def main(steps=800):
         "  a {:.0f}% difference. What was missing was a medium-term component of ANY\n"
         "  shape, not a heavy tail. The evidence can tell them apart ({:+.1f} nats for\n"
         "  RQ) and the 11-year forecast cannot.\n"
-        "\n  And none of it fixes the calibration: 95% coverage is {:.2f} for the best\n"
+        "\n  And it barely moves the calibration: 95% coverage is {:.2f} for the best\n"
         "  ML-II fit against {:.2f} for the hand-set init. ML-II maximizes evidence,\n"
         "  not forecast skill, and that is still the result."
         .format(base["rmse"], ref_rmse, base["trend_l"], horizon,
                 rq["trend_l"], ref_trend_l, base["rmse"] / rq["rmse"], rq["rmse"],
                 rbf["rmse"], rq["rmse"], 100 * abs(rbf["rmse"] - rq["rmse"]) / rq["rmse"],
                 rq["lml"] - rbf["lml"], rq["cover"], ref_cover)
+    )
+
+    # The README reads the scale mixture off at a 20-year lag: how much of the
+    # medium-term variance each fitted medium term still carries there. Slots
+    # 6.. of theta are the medium term's (s2, l[, alpha]) in both arms.
+    lag = np.array([[0.0], [20.0]])
+    med_rq = RationalQuadratic(*rq["theta"][6:9])(lag, lag)
+    med_rbf = RBF(*rbf["theta"][6:8])(lag, lag)
+
+    # The step-by-step walkthrough's readings of the hand-set kernel, at the
+    # lags it names. Pure kernel evaluations, no fit involved.
+    def at(k, lags):
+        return {f"{d:g}": float(k(np.zeros((1, 1)), np.array([[d]]))[0, 0])
+                for d in lags}
+
+    seasonal0 = (Periodic(s2=4.0, l=1.3, p=1.0, fixed=["p"])
+                 * RBF(s2=1.0, l=90.0))
+    walkthrough = dict(
+        prior_var=float(make_kernel("rq")(np.zeros((1, 1)), np.zeros((1, 1)))[0, 0]),
+        seasonal=at(seasonal0, (0.5, 1.0, 10.0)),
+        short=at(Matern(nu=1.5, s2=0.5, l=1.0), (1.0, 3.0)),
+        medium=at(RationalQuadratic(s2=0.66, l=1.2, alpha=0.78), (1.0, 5.0, 20.0)),
+        medium_rbf_log=float(np.log(RBF(s2=0.66, l=1.2)(
+            np.zeros((1, 1)), np.array([[20.0]]))[0, 0] / 0.66)),
     )
 
     # ---- refit on all data, extrapolate to 2040 ----
@@ -194,6 +221,21 @@ def main(steps=800):
         print(f"  {n:>9}: {v:10.4f}")
     print(f"  {'per p':>9}: {1.0:10.4f}   (fixed at 1 yr)")
     print(f"  {'noise s2':>9}: {model_all.noise_var:10.4f}")
+
+    # The README transcribes every number above from this file. --steps 2000
+    # is a check, not the shipped run, so it does not overwrite the log.
+    if steps == 800:
+        save_results("co2", dict(
+            n_obs=len(t), t_min=float(t.min()), t_max=float(t.max()),
+            n_train=int(train.sum()), horizon=float(horizon),
+            handset=dict(rmse=ref_rmse, cover=ref_cover, trend_l=ref_trend_l),
+            arms={"base": base, "rq": rq, "rbf": rbf},
+            lag20_share={"rq": float(med_rq[0, 1] / med_rq[0, 0]),
+                         "rbf": float(med_rbf[0, 1] / med_rbf[0, 0])},
+            full_fit=dict(theta=learned, noise_var=model_all.noise_var,
+                          n_free=int(learned.size) + 1),
+            walkthrough=walkthrough,
+        ))
 
     fig, axes = plt.subplots(
         1, 2, figsize=(10, 3.6), constrained_layout=True,
